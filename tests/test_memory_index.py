@@ -18,11 +18,12 @@ from plugins.memory.graphiti.memory_index import (
 )
 
 
-def _node(name: str, labels: list[str] | None = None) -> SimpleNamespace:
+def _node(name: str, labels: list[str] | None = None, uuid: str | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         name=name,
         labels=labels or ["Person"],
         created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        uuid=uuid,
     )
 
 
@@ -100,18 +101,17 @@ class TestEntityGrouping:
         assert "Heliox" in content
 
     def test_history_available_hint(self, manager, memory_dir):
-        edge = _edge("lived in Barcelona", invalid_at=datetime(2026, 3, 1, tzinfo=timezone.utc))
-        node = _node("Barcelona", ["Place"])
-        node.name = "Barcelona"
-        # The edge's source/target uuid matches has_history detection
-        edge.source_node_uuid = "barcelona-uuid"
-        edge.target_node_uuid = "user-uuid"
+        node = _node("Barcelona", ["Place"], uuid="barcelona-uuid")
+        edge = _edge(
+            "lived in Barcelona",
+            invalid_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            src_uuid="barcelona-uuid",
+            tgt_uuid="user-uuid",
+        )
         manager.update_from_episode([node], [edge])
-        # Entity stored; has_history populated for those uuids
-        # (The name-based check in _render uses the uuid set — so this tests
-        #  that invalid_at edges register in _has_history)
         content = (memory_dir / "MEMORY.md").read_text()
-        assert FENCE_START in content  # sanity
+        assert "Barcelona" in content
+        assert "· history available" in content
 
 
 class TestOnMemoryWrite:

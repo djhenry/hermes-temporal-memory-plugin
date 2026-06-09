@@ -42,11 +42,12 @@ class MemoryIndexManager:
 
     def __init__(self, memory_dir: Path) -> None:
         self._memory_md = memory_dir / "MEMORY.md"
+        # _lock guards all mutable state below AND the file write, so every
+        # caller does a single acquire covering read → mutate → render → write.
         self._lock = threading.Lock()
-        # In-memory entity store: label → {name: last_seen_dt}
         self._entities: dict[str, dict[str, datetime]] = defaultdict(dict)
-        # Track which entities have >1 validity window (history available)
-        self._has_history: set[str] = set()
+        self._has_history: set[str] = set()   # entity display names with ≥1 superseded fact
+        self._uuid_to_name: dict[str, str] = {}  # node uuid → display name
 
     # ------------------------------------------------------------------
     # Public API called from plugin hooks
@@ -59,17 +60,20 @@ class MemoryIndexManager:
             nodes: list of EntityNode objects from get_by_group_ids()
             edges: list of EntityEdge objects (used to detect history)
         """
-        for node in nodes:
-            label = _primary_label(node)
-            self._entities[label][node.name] = getattr(node, "created_at", datetime.now(timezone.utc))
+        with self._lock:
+            for node in nodes:
+                label = _primary_label(node)
+                name = node.name
+                self._entities[label][name] = getattr(node, "created_at", datetime.now(timezone.utc))
+                uuid = getattr(node, "uuid", None)
+                if uuid:
+                    self._uuid_to_name[uuid] = name
 
-        # Any entity with both valid_at and invalid_at on at least one edge has history
-        for edge in edges:
-            if getattr(edge, "invalid_at", None) is not None:
-                self._has_history.add(getattr(edge, "source_node_uuid", ""))
-                self._has_history.add(getattr(edge, "target_node_uuid", ""))
+            for edge in edges:
+                if getattr(edge, "invalid_at", None) is not None:
+                    self._register_history_edge(edge)
 
-        self._flush()
+            self._write_entry(self._render())
 
     def update_from_episode(self, new_nodes: list, new_edges: list) -> None:
         """Merge newly extracted entities after a sync_turn ingestion.
@@ -81,33 +85,38 @@ class MemoryIndexManager:
             new_edges: AddEpisodeResults.edges
         """
         now = datetime.now(timezone.utc)
-        for node in new_nodes:
-            label = _primary_label(node)
-            self._entities[label][node.name] = now
+        with self._lock:
+            for node in new_nodes:
+                label = _primary_label(node)
+                name = node.name
+                self._entities[label][name] = now
+                uuid = getattr(node, "uuid", None)
+                if uuid:
+                    self._uuid_to_name[uuid] = name
 
-        for edge in new_edges:
-            if getattr(edge, "invalid_at", None) is not None:
-                self._has_history.add(getattr(edge, "source_node_uuid", ""))
-                self._has_history.add(getattr(edge, "target_node_uuid", ""))
+            for edge in new_edges:
+                if getattr(edge, "invalid_at", None) is not None:
+                    self._register_history_edge(edge)
 
-        self._flush()
+            self._write_entry(self._render())
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
         """React to the built-in memory tool writing to MEMORY.md.
 
         - add/replace: treat the content as a plain-text entity hint and add
-          it as an "Other" entry so it surfaces in the index.
+          it as a "Notes" entry so it surfaces in the index.
         - remove: if the removed content contains our fence markers, re-seed
           the index immediately so it doesn't disappear.
         """
-        if action in ("add", "replace") and target == "memory" and content:
-            # Don't re-process our own index entry
-            if FENCE_START not in content:
-                self._entities["Notes"][content[:80].strip()] = datetime.now(timezone.utc)
-                self._flush()
-        elif action == "remove" and FENCE_START in (content or ""):
-            # LLM tried to delete our section — re-seed it
-            self._flush()
+        with self._lock:
+            if action in ("add", "replace") and target == "memory" and content:
+                # Don't re-process our own index entry
+                if FENCE_START not in content:
+                    self._entities["Notes"][content[:80].strip()] = datetime.now(timezone.utc)
+                    self._write_entry(self._render())
+            elif action == "remove" and FENCE_START in (content or ""):
+                # LLM tried to delete our section — re-seed it
+                self._write_entry(self._render())
 
     def full_refresh(self, communities: list) -> None:
         """Rebuild index using community summaries from build_communities().
@@ -118,36 +127,72 @@ class MemoryIndexManager:
         Args:
             communities: list of CommunityNode objects
         """
-        if not communities:
-            self._flush()
-            return
-
-        # Replace entity store with community-derived topics
-        self._entities.clear()
-        for community in communities:
-            name = getattr(community, "name", None) or "Unknown"
-            summary = getattr(community, "summary", "") or ""
-            # Use first 60 chars of summary as context hint
-            hint = summary[:60].rstrip()
-            if hint and not hint.endswith((".", "…")):
-                hint += "…"
-            self._entities["Topics"][f"{name}" + (f" ({hint})" if hint else "")] = datetime.now(timezone.utc)
-
-        self._flush()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _flush(self) -> None:
-        """Render current entity state and write to MEMORY.md."""
-        content = self._render()
         with self._lock:
-            self._write_entry(content)
+            if not communities:
+                self._write_entry(self._render())
+                return
+
+            # Replace entity store with community-derived topics.
+            # Clear history/uuid state too — community topics don't map to
+            # prior entity UUIDs, so stale history markers would be wrong.
+            self._entities.clear()
+            self._has_history.clear()
+            self._uuid_to_name.clear()
+
+            for community in communities:
+                name = getattr(community, "name", None) or "Unknown"
+                summary = getattr(community, "summary", "") or ""
+                hint = summary[:60].rstrip()
+                if hint and not hint.endswith((".", "…")):
+                    hint += "…"
+                entry_label = name + (f" ({hint})" if hint else "")
+                self._entities["Topics"][entry_label] = datetime.now(timezone.utc)
+
+            self._write_entry(self._render())
+
+    # ------------------------------------------------------------------
+    # Internal helpers (all callers must hold _lock)
+    # ------------------------------------------------------------------
+
+    def _register_history_edge(self, edge) -> None:
+        """Mark the entities at both ends of a superseded edge as having history."""
+        for uuid in (getattr(edge, "source_node_uuid", ""), getattr(edge, "target_node_uuid", "")):
+            name = self._uuid_to_name.get(uuid)
+            if name:
+                self._has_history.add(name)
 
     def _render(self) -> str:
-        """Render entity store into the fenced index block."""
+        """Render entity store into the fenced index block, trimming if over cap.
+
+        Caller must hold _lock.
+        """
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        body = self._render_body(now_str)
+
+        # Enforce token cap: drop least-recently-seen entities one at a time.
+        while len(body) > MAX_INDEX_CHARS and self._entities:
+            oldest_label = oldest_name = None
+            oldest_dt = datetime.max.replace(tzinfo=timezone.utc)
+            for label, ents in self._entities.items():
+                for name, dt in ents.items():
+                    if dt < oldest_dt:
+                        oldest_dt = dt
+                        oldest_label = label
+                        oldest_name = name
+            if not (oldest_label and oldest_name):
+                break
+            del self._entities[oldest_label][oldest_name]
+            if not self._entities[oldest_label]:
+                del self._entities[oldest_label]
+            body = self._render_body(now_str)
+
+        return body
+
+    def _render_body(self, now_str: str) -> str:
+        """Pure render of current entity state — no trimming, no side effects.
+
+        Caller must hold _lock.
+        """
         lines = [
             FENCE_START,
             "## Temporal Memory Index",
@@ -155,7 +200,6 @@ class MemoryIndexManager:
             "",
         ]
 
-        # Preferred label order; anything else falls to the end
         label_order = ["Person", "Place", "Organization", "Project", "Topics", "Notes"]
         display_names = {
             "Person": "People",
@@ -166,13 +210,12 @@ class MemoryIndexManager:
             "Notes": "Notes",
         }
 
-        all_labels = label_order + [l for l in self._entities if l not in label_order]
+        all_labels = label_order + [lbl for lbl in self._entities if lbl not in label_order]
 
         for label in all_labels:
             entities = self._entities.get(label)
             if not entities:
                 continue
-            # Sort by last-seen descending
             sorted_names = sorted(entities.items(), key=lambda kv: kv[1], reverse=True)
             parts = []
             for name, _ in sorted_names:
@@ -183,46 +226,7 @@ class MemoryIndexManager:
             lines.append(f"**{display}:** {', '.join(parts)}")
 
         lines.append(FENCE_END)
-        body = "\n".join(lines)
-
-        # Enforce token cap: drop least-recently-seen entities
-        while len(body) > MAX_INDEX_CHARS and self._entities:
-            # Remove the single oldest entity across all labels
-            oldest_label = None
-            oldest_name = None
-            oldest_dt = datetime.max.replace(tzinfo=timezone.utc)
-            for label, ents in self._entities.items():
-                for name, dt in ents.items():
-                    if dt < oldest_dt:
-                        oldest_dt = dt
-                        oldest_label = label
-                        oldest_name = name
-            if oldest_label and oldest_name:
-                del self._entities[oldest_label][oldest_name]
-                if not self._entities[oldest_label]:
-                    del self._entities[oldest_label]
-                body = self._render()  # re-render after trimming
-            else:
-                break
-
-        return body
-
-    def _read_entry(self) -> tuple[str, int, int] | None:
-        """Find the fenced block in MEMORY.md.
-
-        Returns (raw_text, start_char_offset, end_char_offset) or None.
-        """
-        if not self._memory_md.exists():
-            return None
-        text = self._memory_md.read_text(encoding="utf-8")
-        start = text.find(FENCE_START)
-        if start == -1:
-            return None
-        end = text.find(FENCE_END, start)
-        if end == -1:
-            return None
-        end += len(FENCE_END)
-        return text[start:end], start, end
+        return "\n".join(lines)
 
     def _write_entry(self, new_content: str) -> None:
         """Atomic read-modify-write of the fenced index block in MEMORY.md.
@@ -230,6 +234,8 @@ class MemoryIndexManager:
         - If the fenced block exists: replace it in-place.
         - If not: append it as a new §-delimited entry.
         - Content outside the fence is never touched.
+
+        Caller must hold _lock.
         """
         if self._memory_md.exists():
             text = self._memory_md.read_text(encoding="utf-8")
@@ -240,11 +246,9 @@ class MemoryIndexManager:
         end_marker_pos = text.find(FENCE_END, max(start, 0))
 
         if start != -1 and end_marker_pos != -1:
-            # Replace existing fenced block
             end = end_marker_pos + len(FENCE_END)
             new_text = text[:start] + new_content + text[end:]
         else:
-            # Append as a new §-delimited entry
             separator = ENTRY_SEP if text.strip() else ""
             new_text = text + separator + new_content
 
@@ -258,7 +262,6 @@ class MemoryIndexManager:
 def _primary_label(node) -> str:
     """Return the most specific label from a Graphiti EntityNode."""
     labels = getattr(node, "labels", None) or []
-    # Skip generic graph labels
     skip = {"__Entity__", "Entity", "Node"}
     for label in labels:
         if label not in skip:

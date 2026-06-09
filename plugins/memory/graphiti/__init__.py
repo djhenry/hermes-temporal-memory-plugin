@@ -236,15 +236,8 @@ class GraphitiMemoryProvider(_MemoryBase):
             fact = getattr(edge, "fact", str(edge))
             valid_at = getattr(edge, "valid_at", None)
             invalid_at = getattr(edge, "invalid_at", None)
-
-            if valid_at and invalid_at:
-                window = f"[{_fmt_date(valid_at)} → {_fmt_date(invalid_at)}]"
-            elif valid_at:
-                window = f"[{_fmt_date(valid_at)} → now]"
-            else:
-                window = ""
-
-            line = f"- {window} {fact}".strip()
+            window = _fmt_window(valid_at, invalid_at)
+            line = f"- {window + ' ' if window else ''}{fact}"
             token_budget -= len(line) // 4
             if token_budget <= 0:
                 break
@@ -358,7 +351,8 @@ class GraphitiMemoryProvider(_MemoryBase):
                 config=bm25_cfg,
             ))
             return result.edges
-        except Exception:
+        except Exception as exc:
+            log.warning("graphiti BM25 fallback search failed: %s", exc)
             return []
 
     # ------------------------------------------------------------------
@@ -374,24 +368,26 @@ class GraphitiMemoryProvider(_MemoryBase):
         if not edges:
             return "No facts found."
 
+        as_of_dt = None
+        if as_of:
+            try:
+                as_of_dt = datetime.fromisoformat(as_of).replace(tzinfo=timezone.utc)
+            except ValueError:
+                return f"temporal_search error: invalid as_of date '{as_of}' — use ISO-8601 (YYYY-MM-DD)"
+
         lines = []
         for edge in edges:
             fact = getattr(edge, "fact", str(edge))
             valid_at = getattr(edge, "valid_at", None)
             invalid_at = getattr(edge, "invalid_at", None)
-            window = ""
-            if valid_at and invalid_at:
-                window = f"[{_fmt_date(valid_at)} → {_fmt_date(invalid_at)}] "
-            elif valid_at:
-                window = f"[{_fmt_date(valid_at)} → now] "
-            if as_of:
+            if as_of_dt:
                 # Filter client-side if the backend didn't
-                as_of_dt = datetime.fromisoformat(as_of).replace(tzinfo=timezone.utc)
                 if valid_at and valid_at > as_of_dt:
                     continue
                 if invalid_at and invalid_at < as_of_dt:
                     continue
-            lines.append(f"- {window}{fact}")
+            window = _fmt_window(valid_at, invalid_at)
+            lines.append(f"- {window + ' ' if window else ''}{fact}")
 
         return "\n".join(lines) if lines else "No facts valid at that time."
 
@@ -422,12 +418,7 @@ class GraphitiMemoryProvider(_MemoryBase):
             fact = getattr(edge, "fact", str(edge))
             valid_at = getattr(edge, "valid_at", None)
             invalid_at = getattr(edge, "invalid_at", None)
-            if valid_at and invalid_at:
-                window = f"[{_fmt_date(valid_at)} → {_fmt_date(invalid_at)}]"
-            elif valid_at:
-                window = f"[{_fmt_date(valid_at)} → now]"
-            else:
-                window = "[unknown period]"
+            window = _fmt_window(valid_at, invalid_at, unknown="[unknown period]")
             lines.append(f"  {window} {fact}")
 
         return "\n".join(lines)
@@ -682,6 +673,19 @@ def _fmt_date(dt: datetime | None) -> str:
     if dt is None:
         return "?"
     return dt.strftime("%Y-%m")
+
+
+def _fmt_window(
+    valid_at: datetime | None,
+    invalid_at: datetime | None,
+    unknown: str = "",
+) -> str:
+    """Format a bi-temporal validity window as a bracketed string."""
+    if valid_at and invalid_at:
+        return f"[{_fmt_date(valid_at)} → {_fmt_date(invalid_at)}]"
+    if valid_at:
+        return f"[{_fmt_date(valid_at)} → now]"
+    return unknown
 
 
 def _strip_fences(text: str) -> str:
