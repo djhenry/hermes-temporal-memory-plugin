@@ -459,11 +459,20 @@ class GraphitiMemoryProvider(_MemoryBase):
                 reference_time=datetime.now(timezone.utc),
                 group_id=self._group_id,
             ))
-            # Update recall-trigger index with newly extracted entities
-            if self._index and result:
-                new_nodes = getattr(result, "nodes", [])
-                new_edges = getattr(result, "edges", [])
-                if new_nodes or new_edges:
+            if result:
+                new_nodes = getattr(result, "nodes", []) or []
+                new_edges = getattr(result, "edges", []) or []
+
+                # Phase 3: log superseded facts so the user can see what the agent learned.
+                for edge in new_edges:
+                    if getattr(edge, "invalid_at", None):
+                        log.info(
+                            "[graphiti] Superseded: %s",
+                            getattr(edge, "fact", "unknown fact"),
+                        )
+
+                # Update recall-trigger index with newly extracted entities
+                if self._index and (new_nodes or new_edges):
                     self._index.update_from_episode(new_nodes, new_edges)
         except Exception as exc:
             log.warning("graphiti sync_turn ingestion failed: %s", exc)

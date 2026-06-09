@@ -20,5 +20,6 @@ hooks:
   - shutdown
 entrypoint: plugins.memory.graphiti:register
 backends:
-  - sqlite   # default; no Docker required
-  - neo4j    # for multi-user / large-graph deployments
+  - neo4j        # primary — Docker/cloud, recommended for production
+  - kuzu         # embedded, no Docker, Python 3.11+ (deprecated upstream)
+  - falkordblite # embedded, no Docker, Python 3.12+ (recommended for offline)
