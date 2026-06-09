@@ -311,12 +311,13 @@ class TestLiveGraphiti:
         p.initialize("live-session", identity="tester", hermes_home=str(tmp_path))
         time.sleep(0.2)
 
-        p.sync_turn(
+        # Call ingestion synchronously so the pytest timeout governs wait time,
+        # not a fixed join. sync_turn uses a daemon thread that free-tier LLMs
+        # can outlast; _ingest_turn blocks until all LLM calls complete.
+        p._ingest_turn(
             "I just moved from Barcelona to Madrid.",
             "Noted — I'll remember you're in Madrid now.",
         )
-        if p._sync_thread:
-            p._sync_thread.join(timeout=90)  # free-tier models can be slow
 
         result = p.prefetch("where do I live")
         assert result is not None
