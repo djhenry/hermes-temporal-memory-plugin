@@ -150,6 +150,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         return bool(
             os.environ.get("GRAPHITI_NEO4J_URI")
             or os.environ.get("GRAPHITI_USE_KUZU")
+            or os.environ.get("GRAPHITI_USE_FALKORDB_LITE")
             or self._cfg.backend in ("kuzu", "falkordblite")
         )
 
@@ -540,6 +541,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         llm_client = _build_llm_client()
         backend = self._cfg.backend
         use_kuzu = os.environ.get("GRAPHITI_USE_KUZU") or backend == "kuzu"
+        use_falkordblite = os.environ.get("GRAPHITI_USE_FALKORDB_LITE") or backend == "falkordblite"
 
         if use_kuzu:
             import warnings
@@ -562,10 +564,23 @@ class GraphitiMemoryProvider(_MemoryBase):
                 kwargs["llm_client"] = llm_client
             return Graphiti(**kwargs)
 
-        if backend == "falkordblite":
+        if use_falkordblite:
             # Requires Python 3.12+ and pip install graphiti-core[falkordblite]
             from graphiti_core.driver.falkordb_driver import FalkorDriver  # type: ignore[import]
-            kwargs = {"graph_driver": FalkorDriver()}
+            try:
+                from redislite.async_falkordb_client import AsyncFalkorDB  # type: ignore[import]
+            except ImportError as exc:
+                raise RuntimeError(
+                    "FalkorDB Lite requires Python 3.12+ and graphiti-core[falkordblite]. "
+                    "Run: pip install 'graphiti-core[falkordblite]'"
+                ) from exc
+            db_path = os.environ.get(
+                "GRAPHITI_FALKORDBLITE_PATH",
+                str(Path.home() / ".hermes" / "graphiti.fdb"),
+            )
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            falkor_client = AsyncFalkorDB(dbfilename=db_path)
+            kwargs = {"graph_driver": FalkorDriver(falkor_db=falkor_client)}
             if llm_client:
                 kwargs["llm_client"] = llm_client
             return Graphiti(**kwargs)
