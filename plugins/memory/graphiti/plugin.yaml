@@ -1,0 +1,24 @@
+name: graphiti
+version: "0.1.0"
+description: >
+  Temporal knowledge-graph memory provider powered by Graphiti (Zep).
+  Stores entities, relationships, and bi-temporal validity windows.
+  Surfaces a recall-trigger index in MEMORY.md and supports hybrid
+  (vector + BM25 + graph traversal) retrieval.
+author: djhenry
+min_hermes_version: "1.0.0"
+type: memory_provider
+hooks:
+  - initialize
+  - prefetch
+  - sync_turn
+  - handle_tool_call
+  - get_tool_schemas
+  - on_memory_write
+  - on_session_end
+  - system_prompt_block
+  - shutdown
+entrypoint: plugins.memory.graphiti:register
+backends:
+  - sqlite   # default; no Docker required
+  - neo4j    # for multi-user / large-graph deployments

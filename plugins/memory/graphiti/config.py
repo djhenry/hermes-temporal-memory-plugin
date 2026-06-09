@@ -1,0 +1,30 @@
+"""Pydantic config model for the Graphiti memory provider plugin."""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+class ExtractionConfig(BaseModel):
+    provider: Literal["openai", "anthropic", "gemini", "groq", "ollama", "inherit"] = "inherit"
+    model: str | None = None
+    base_url: str | None = None  # used for ollama
+
+
+class GraphitiConfig(BaseModel):
+    backend: Literal["sqlite", "neo4j"] = "sqlite"
+    recall_mode: Literal["hybrid", "context", "tools"] = "hybrid"
+
+    # Original plan: power-user escape hatch only (index-bridge approach is the default)
+    disable_builtin_memory_tool: bool = False
+
+    semaphore_limit: int = Field(default=5, ge=1, le=50)
+    max_recall_tokens: int = Field(default=600, ge=100, le=2000)
+
+    # Index feature (new)
+    enable_memory_index: bool = True
+    max_index_tokens: int = Field(default=200, ge=50, le=500)
+
+    extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
