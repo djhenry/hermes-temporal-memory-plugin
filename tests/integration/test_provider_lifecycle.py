@@ -72,7 +72,7 @@ def mock_client():
 
 @pytest.fixture
 def provider(mock_client, hermes_home, monkeypatch):
-    monkeypatch.setenv("GRAPHITI_USE_SQLITE", "1")
+    monkeypatch.setenv("GRAPHITI_USE_KUZU", "1")
     with patch.object(GraphitiMemoryProvider, "_build_client", return_value=mock_client):
         p = GraphitiMemoryProvider()
         p.initialize("sess-001", identity="testuser", hermes_home=str(hermes_home))
@@ -84,14 +84,14 @@ def provider(mock_client, hermes_home, monkeypatch):
 
 class TestInit:
     def test_group_id_uses_identity(self, mock_client, hermes_home, monkeypatch):
-        monkeypatch.setenv("GRAPHITI_USE_SQLITE", "1")
+        monkeypatch.setenv("GRAPHITI_USE_KUZU", "1")
         with patch.object(GraphitiMemoryProvider, "_build_client", return_value=mock_client):
             p = GraphitiMemoryProvider()
             p.initialize("s1", identity="alice", hermes_home=str(hermes_home))
         assert p._group_id == "hermes-alice"
 
     def test_group_id_appends_platform_user(self, mock_client, hermes_home, monkeypatch):
-        monkeypatch.setenv("GRAPHITI_USE_SQLITE", "1")
+        monkeypatch.setenv("GRAPHITI_USE_KUZU", "1")
         source = SimpleNamespace(user_id="tg-99")
         with patch.object(GraphitiMemoryProvider, "_build_client", return_value=mock_client):
             p = GraphitiMemoryProvider()
@@ -99,12 +99,12 @@ class TestInit:
                          hermes_home=str(hermes_home))
         assert p._group_id == "hermes-alice-tg-99"
 
-    def test_is_available_true_when_sqlite_env_set(self, monkeypatch):
-        monkeypatch.setenv("GRAPHITI_USE_SQLITE", "1")
+    def test_is_available_true_when_kuzu_env_set(self, monkeypatch):
+        monkeypatch.setenv("GRAPHITI_USE_KUZU", "1")
         assert GraphitiMemoryProvider().is_available() is True
 
     def test_is_available_false_when_nothing_configured(self, monkeypatch):
-        monkeypatch.delenv("GRAPHITI_USE_SQLITE", raising=False)
+        monkeypatch.delenv("GRAPHITI_USE_KUZU", raising=False)
         monkeypatch.delenv("GRAPHITI_NEO4J_URI", raising=False)
         p = GraphitiMemoryProvider()
         p._cfg.backend = "neo4j"  # prevent sqlite-default from triggering
@@ -291,7 +291,7 @@ class TestLiveGraphiti:
 
     Prerequisites:
         pip install graphiti-core[sqlite]
-        GRAPHITI_USE_SQLITE=1
+        GRAPHITI_USE_KUZU=1
         OPENAI_API_KEY (or equivalent extraction LLM configured)
 
     Run: make test-live

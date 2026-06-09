@@ -14,7 +14,10 @@ class ExtractionConfig(BaseModel):
 
 
 class GraphitiConfig(BaseModel):
-    backend: Literal["sqlite", "neo4j"] = "sqlite"
+    # neo4j: Docker/cloud, recommended for production and multi-user deployments.
+    # kuzu: embedded, no Docker, single-user (deprecated upstream — use for dev/offline only).
+    # falkordblite: embedded, no Docker, production-quality (requires Python 3.12+).
+    backend: Literal["neo4j", "kuzu", "falkordblite"] = "neo4j"
     recall_mode: Literal["hybrid", "context", "tools"] = "hybrid"
 
     # Original plan: power-user escape hatch only (index-bridge approach is the default)

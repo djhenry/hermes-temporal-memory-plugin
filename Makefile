@@ -17,6 +17,17 @@ install-hermes: $(HERMES_DIR)/.git
 install: install-hermes
 	$(PIP) install -e ".[sqlite,dev]" -q
 
+# ── Environment ────────────────────────────────────────────────────────────
+
+# Start Neo4j via Docker and validate the full live stack
+setup-neo4j:
+	docker compose up -d
+	bash scripts/setup_env.sh --neo4j
+
+# Install Kuzu (embedded, no Docker) and validate — dev/offline only
+setup-kuzu:
+	bash scripts/setup_env.sh --kuzu
+
 # ── Tests ──────────────────────────────────────────────────────────────────
 
 # Unit tests — no hermes-agent or graphiti-core needed

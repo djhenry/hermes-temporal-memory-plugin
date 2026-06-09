@@ -149,8 +149,8 @@ class GraphitiMemoryProvider(_MemoryBase):
         # No network call — just check that at least one backend is configured.
         return bool(
             os.environ.get("GRAPHITI_NEO4J_URI")
-            or os.environ.get("GRAPHITI_USE_SQLITE")
-            or self._cfg.backend == "sqlite"
+            or os.environ.get("GRAPHITI_USE_KUZU")
+            or self._cfg.backend in ("kuzu", "falkordblite")
         )
 
     # ------------------------------------------------------------------
@@ -169,6 +169,12 @@ class GraphitiMemoryProvider(_MemoryBase):
         self._group_id = f"hermes-{identity}{user_suffix}"
 
         self._client = self._build_client()
+
+        # Create graph indices/constraints (no-op for Kuzu; required for Neo4j/FalkorDB).
+        try:
+            _run_sync(self._client.build_indices_and_constraints())
+        except Exception as exc:
+            log.warning("graphiti build_indices_and_constraints failed (continuing): %s", exc)
 
         # Build the MEMORY.md index manager
         if self._cfg.enable_memory_index:
@@ -191,8 +197,7 @@ class GraphitiMemoryProvider(_MemoryBase):
             self._sync_thread.join(timeout=5)
         if self._client:
             try:
-                import asyncio
-                asyncio.get_event_loop().run_until_complete(self._client.close())
+                _run_sync(self._client.close())
             except Exception:
                 pass
 
@@ -213,7 +218,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         if self._cfg.recall_mode == "tools":
             return None
         try:
-            results = _run_sync(self._client.search(
+            edges: list = _run_sync(self._client.search(
                 query=query,
                 group_ids=[self._group_id],
                 num_results=10,
@@ -222,7 +227,6 @@ class GraphitiMemoryProvider(_MemoryBase):
             log.warning("graphiti prefetch failed: %s", exc)
             return None
 
-        edges = results if isinstance(results, list) else getattr(results, "edges", [])
         if not edges:
             return None
 
@@ -328,7 +332,7 @@ class GraphitiMemoryProvider(_MemoryBase):
 
     def _temporal_search(self, query: str, as_of: str | None = None) -> str:
         try:
-            results = _run_sync(self._client.search(
+            edges: list = _run_sync(self._client.search(
                 query=query,
                 group_ids=[self._group_id],
                 num_results=15,
@@ -336,7 +340,6 @@ class GraphitiMemoryProvider(_MemoryBase):
         except Exception as exc:
             return f"temporal_search error: {exc}"
 
-        edges = results if isinstance(results, list) else getattr(results, "edges", [])
         if not edges:
             return "No facts found."
 
@@ -363,8 +366,7 @@ class GraphitiMemoryProvider(_MemoryBase):
 
     def _fact_history(self, entity: str, relationship: str | None = None) -> str:
         try:
-            # Search for all facts about this entity
-            results = _run_sync(self._client.search(
+            edges: list = _run_sync(self._client.search(
                 query=entity,
                 group_ids=[self._group_id],
                 num_results=50,
@@ -372,7 +374,6 @@ class GraphitiMemoryProvider(_MemoryBase):
         except Exception as exc:
             return f"fact_history error: {exc}"
 
-        edges = results if isinstance(results, list) else getattr(results, "edges", [])
         # Filter edges that mention the entity
         entity_lower = entity.lower()
         relevant = [
@@ -406,7 +407,7 @@ class GraphitiMemoryProvider(_MemoryBase):
 
     def _graph_browse(self, entity: str, depth: int = 1) -> str:
         try:
-            results = _run_sync(self._client.search(
+            edges: list = _run_sync(self._client.search(
                 query=entity,
                 group_ids=[self._group_id],
                 num_results=20,
@@ -414,7 +415,6 @@ class GraphitiMemoryProvider(_MemoryBase):
         except Exception as exc:
             return f"graph_browse error: {exc}"
 
-        edges = results if isinstance(results, list) else getattr(results, "edges", [])
         if not edges:
             return f"No connections found for '{entity}'."
 
@@ -514,14 +514,30 @@ class GraphitiMemoryProvider(_MemoryBase):
     def _build_client(self) -> Any:
         from graphiti_core import Graphiti  # type: ignore[import]
 
-        if self._cfg.backend == "sqlite" or os.environ.get("GRAPHITI_USE_SQLITE"):
-            # SQLite backend — no Docker needed
-            db_path = os.environ.get(
-                "GRAPHITI_SQLITE_PATH",
-                str(Path.home() / ".hermes" / "graphiti.db"),
-            )
-            return Graphiti(database_url=f"sqlite:///{db_path}")
+        backend = self._cfg.backend
+        use_kuzu = os.environ.get("GRAPHITI_USE_KUZU") or backend == "kuzu"
 
+        if use_kuzu:
+            import warnings
+            warnings.warn(
+                "The Kuzu backend for graphiti-core is deprecated and will be removed in a "
+                "future release. Migrate to Neo4j (Docker) or FalkorDB Lite (Python 3.12+).",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            from graphiti_core.driver.kuzu_driver import KuzuDriver  # type: ignore[import]
+            db_path = os.environ.get(
+                "GRAPHITI_KUZU_PATH",
+                str(Path.home() / ".hermes" / "graphiti.kuzu"),
+            )
+            return Graphiti(graph_driver=KuzuDriver(db=db_path))
+
+        if backend == "falkordblite":
+            # Requires Python 3.12+ and pip install graphiti-core[falkordblite]
+            from graphiti_core.driver.falkordb_driver import FalkorDriver  # type: ignore[import]
+            return Graphiti(graph_driver=FalkorDriver())
+
+        # Neo4j — default for production / multi-user / gateway deployments
         return Graphiti(
             uri=os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687"),
             user=os.environ.get("GRAPHITI_NEO4J_USER", "neo4j"),
