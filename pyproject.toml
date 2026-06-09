@@ -20,7 +20,7 @@ kuzu = ["graphiti-core[kuzu]>=0.29"]
 falkordblite = ["graphiti-core[falkordblite]>=0.29"]
 # Neo4j client (already bundled in graphiti-core but listed for clarity)
 neo4j = ["neo4j>=5.0"]
-dev = ["pytest>=8.0", "pytest-asyncio"]
+dev = ["pytest>=8.0", "pytest-asyncio", "pytest-timeout"]
 
 [project.entry-points."hermes.memory.providers"]
 graphiti = "plugins.memory.graphiti:register"

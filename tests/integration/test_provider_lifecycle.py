@@ -287,12 +287,14 @@ class TestTools:
 
 @pytest.mark.live
 class TestLiveGraphiti:
-    """End-to-end round-trip against real Graphiti SQLite backend.
+    """End-to-end round-trip against real Graphiti (Kuzu embedded backend).
 
     Prerequisites:
-        pip install graphiti-core[sqlite]
+        pip install hermes-graphiti[kuzu]
         GRAPHITI_USE_KUZU=1
-        OPENAI_API_KEY (or equivalent extraction LLM configured)
+        OPENAI_API_KEY         — any OpenAI-compatible key, including OpenRouter
+        OPENAI_BASE_URL        — https://openrouter.ai/api/v1 for OpenRouter
+        GRAPHITI_LLM_MODEL     — optional; defaults to gpt-4o-mini
 
     Run: make test-live
     """

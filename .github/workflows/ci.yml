@@ -37,3 +37,27 @@ jobs:
 
       - name: Integration tests
         run: python3 -m pytest tests/integration/ -v -m "not live"
+
+  live:
+    name: Live tests (Kuzu + OpenRouter)
+    runs-on: ubuntu-latest
+    # Forks and dependabot PRs won't have the secret — the test itself skips
+    # gracefully when OPENAI_API_KEY is empty (pytest.skip inside the test).
+    env:
+      GRAPHITI_USE_KUZU: "1"
+      # OpenRouter is OpenAI-API-compatible — point the base URL and use any free model.
+      OPENAI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENAI_BASE_URL: https://openrouter.ai/api/v1
+      GRAPHITI_EXTRACTION_MODEL: meta-llama/llama-3.1-8b-instruct:free
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install plugin with Kuzu backend
+        run: pip install -e ".[kuzu,dev]" -q && make install-hermes
+
+      - name: Live integration tests
+        run: python3 -m pytest tests/integration/ -v -m "live" --timeout=120

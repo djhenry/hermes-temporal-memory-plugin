@@ -523,6 +523,7 @@ class GraphitiMemoryProvider(_MemoryBase):
     def _build_client(self) -> Any:
         from graphiti_core import Graphiti  # type: ignore[import]
 
+        llm_client = _build_llm_client()
         backend = self._cfg.backend
         use_kuzu = os.environ.get("GRAPHITI_USE_KUZU") or backend == "kuzu"
 
@@ -539,19 +540,28 @@ class GraphitiMemoryProvider(_MemoryBase):
                 "GRAPHITI_KUZU_PATH",
                 str(Path.home() / ".hermes" / "graphiti.kuzu"),
             )
-            return Graphiti(graph_driver=KuzuDriver(db=db_path))
+            kwargs = {"graph_driver": KuzuDriver(db=db_path)}
+            if llm_client:
+                kwargs["llm_client"] = llm_client
+            return Graphiti(**kwargs)
 
         if backend == "falkordblite":
             # Requires Python 3.12+ and pip install graphiti-core[falkordblite]
             from graphiti_core.driver.falkordb_driver import FalkorDriver  # type: ignore[import]
-            return Graphiti(graph_driver=FalkorDriver())
+            kwargs = {"graph_driver": FalkorDriver()}
+            if llm_client:
+                kwargs["llm_client"] = llm_client
+            return Graphiti(**kwargs)
 
         # Neo4j — default for production / multi-user / gateway deployments
-        return Graphiti(
-            uri=os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687"),
-            user=os.environ.get("GRAPHITI_NEO4J_USER", "neo4j"),
-            password=os.environ.get("GRAPHITI_NEO4J_PASSWORD", "password"),
-        )
+        kwargs = {
+            "uri": os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687"),
+            "user": os.environ.get("GRAPHITI_NEO4J_USER", "neo4j"),
+            "password": os.environ.get("GRAPHITI_NEO4J_PASSWORD", "password"),
+        }
+        if llm_client:
+            kwargs["llm_client"] = llm_client
+        return Graphiti(**kwargs)
 
 
     # ------------------------------------------------------------------
@@ -667,6 +677,31 @@ def _strip_fences(text: str) -> str:
         flags=re.DOTALL,
     )
     return text.strip()
+
+
+def _build_llm_client() -> Any | None:
+    """Build a Graphiti LLMClient from env vars, if GRAPHITI_LLM_MODEL is set.
+
+    Supports any OpenAI-compatible endpoint via OPENAI_BASE_URL — including
+    OpenRouter (https://openrouter.ai/api/v1) for free or cheap models in CI.
+    Returns None to let Graphiti use its default (reads OPENAI_API_KEY itself).
+    """
+    model = os.environ.get("GRAPHITI_LLM_MODEL")
+    if not model:
+        return None
+
+    try:
+        from graphiti_core.llm_client.openai_client import OpenAIClient  # type: ignore[import]
+        from graphiti_core.llm_client.config import LLMConfig  # type: ignore[import]
+
+        cfg = LLMConfig(model=model)
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        if base_url:
+            cfg.base_url = base_url
+        return OpenAIClient(cfg)
+    except Exception as exc:
+        log.debug("Could not build custom LLM client (%s); using Graphiti default.", exc)
+        return None
 
 
 def _run_sync(coro: Any) -> Any:
