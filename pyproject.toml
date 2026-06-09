@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-graphiti"
@@ -9,14 +9,18 @@ description = "Temporal knowledge-graph memory provider for Hermes Agent (Graphi
 license = {text = "MIT"}
 requires-python = ">=3.11"
 dependencies = [
-    "graphiti-core>=0.3",
+    "graphiti-core>=0.29",
     "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
+# Embedded/local backend (deprecated upstream, single-user dev/offline use)
+kuzu = ["graphiti-core[kuzu]>=0.29"]
+# Embedded/local backend — production-quality, requires Python 3.12+
+falkordblite = ["graphiti-core[falkordblite]>=0.29"]
+# Neo4j client (already bundled in graphiti-core but listed for clarity)
 neo4j = ["neo4j>=5.0"]
-sqlite = ["graphiti-core[sqlite]>=0.3"]
-dev = ["pytest>=8.0", "pytest-asyncio"]
+dev = ["pytest>=8.0", "pytest-asyncio", "pytest-timeout"]
 
 [project.entry-points."hermes.memory.providers"]
 graphiti = "plugins.memory.graphiti:register"
@@ -27,3 +31,7 @@ include = ["plugins*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "live: end-to-end tests requiring real backend and extraction LLM key",
+]

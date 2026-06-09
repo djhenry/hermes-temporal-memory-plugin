@@ -24,6 +24,11 @@ from .memory_index import MemoryIndexManager
 
 log = logging.getLogger(__name__)
 
+try:
+    from agent.memory_provider import MemoryProvider as _MemoryBase  # type: ignore[import]
+except ImportError:
+    _MemoryBase = object  # running outside Hermes (tests, standalone)
+
 # Tool JSON schemas -------------------------------------------------------
 
 TEMPORAL_SEARCH_SCHEMA = {
@@ -123,7 +128,7 @@ SYSTEM_PROMPT_BLOCK = (
 # -------------------------------------------------------------------------
 
 
-class GraphitiMemoryProvider:
+class GraphitiMemoryProvider(_MemoryBase):
     """Hermes MemoryProvider backed by Graphiti temporal knowledge graph."""
 
     name = "graphiti"
@@ -144,8 +149,8 @@ class GraphitiMemoryProvider:
         # No network call — just check that at least one backend is configured.
         return bool(
             os.environ.get("GRAPHITI_NEO4J_URI")
-            or os.environ.get("GRAPHITI_USE_SQLITE")
-            or self._cfg.backend == "sqlite"
+            or os.environ.get("GRAPHITI_USE_KUZU")
+            or self._cfg.backend in ("kuzu", "falkordblite")
         )
 
     # ------------------------------------------------------------------
@@ -164,6 +169,16 @@ class GraphitiMemoryProvider:
         self._group_id = f"hermes-{identity}{user_suffix}"
 
         self._client = self._build_client()
+
+        # KuzuDriver never sets _database (graphiti-core bug); patch it here so
+        # graphiti.py's `group_id != driver._database` check doesn't throw.
+        _patch_kuzu_database(self._client, self._group_id)
+
+        # Create graph indices/constraints (no-op for Kuzu; required for Neo4j/FalkorDB).
+        try:
+            _run_sync(self._client.build_indices_and_constraints())
+        except Exception as exc:
+            log.warning("graphiti build_indices_and_constraints failed (continuing): %s", exc)
 
         # Build the MEMORY.md index manager
         if self._cfg.enable_memory_index:
@@ -186,8 +201,7 @@ class GraphitiMemoryProvider:
             self._sync_thread.join(timeout=5)
         if self._client:
             try:
-                import asyncio
-                asyncio.get_event_loop().run_until_complete(self._client.close())
+                _run_sync(self._client.close())
             except Exception:
                 pass
 
@@ -208,16 +222,11 @@ class GraphitiMemoryProvider:
         if self._cfg.recall_mode == "tools":
             return None
         try:
-            results = _run_sync(self._client.search(
-                query=query,
-                group_ids=[self._group_id],
-                num_results=10,
-            ))
+            edges: list = self._search_edges(query, num_results=10)
         except Exception as exc:
             log.warning("graphiti prefetch failed: %s", exc)
             return None
 
-        edges = results if isinstance(results, list) else getattr(results, "edges", [])
         if not edges:
             return None
 
@@ -267,8 +276,9 @@ class GraphitiMemoryProvider:
     # ------------------------------------------------------------------
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
-        # Mirror to graph (tagged as source: memory_tool per Lesson 9)
-        if action in ("add", "replace") and (content or "").strip():
+        # Mirror episodic memory writes to graph (Lesson 9).
+        # USER.md writes are profile data, not episodic — skip them.
+        if action in ("add", "replace") and target == "memory" and (content or "").strip():
             threading.Thread(
                 target=self._mirror_memory_write,
                 args=(action, target, content),
@@ -317,20 +327,50 @@ class GraphitiMemoryProvider:
         return f"Unknown tool: {name}"
 
     # ------------------------------------------------------------------
+    # Internal search helper
+    # ------------------------------------------------------------------
+
+    def _search_edges(self, query: str, num_results: int = 10) -> list:
+        """Run hybrid search; fall back to BM25-only when the embeddings
+        endpoint is unavailable (e.g. OpenRouter proxy doesn't expose /embeddings)."""
+        try:
+            return _run_sync(self._client.search(
+                query=query,
+                group_ids=[self._group_id],
+                num_results=num_results,
+            ))
+        except Exception as exc:
+            if "connection" not in str(exc).lower():
+                raise
+        # Embeddings endpoint unreachable — retry with BM25-only search config.
+        try:
+            from graphiti_core.search.search_config import (
+                EdgeSearchConfig, EdgeSearchMethod, EdgeReranker, SearchConfig,
+            )
+            bm25_cfg = SearchConfig(edge_config=EdgeSearchConfig(
+                search_methods=[EdgeSearchMethod.bm25],
+                reranker=EdgeReranker.rrf,
+            ))
+            bm25_cfg.limit = num_results
+            result = _run_sync(self._client.search_(
+                query=query,
+                group_ids=[self._group_id],
+                config=bm25_cfg,
+            ))
+            return result.edges
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
     # Tool implementations
     # ------------------------------------------------------------------
 
     def _temporal_search(self, query: str, as_of: str | None = None) -> str:
         try:
-            results = _run_sync(self._client.search(
-                query=query,
-                group_ids=[self._group_id],
-                num_results=15,
-            ))
+            edges: list = self._search_edges(query, num_results=15)
         except Exception as exc:
             return f"temporal_search error: {exc}"
 
-        edges = results if isinstance(results, list) else getattr(results, "edges", [])
         if not edges:
             return "No facts found."
 
@@ -357,16 +397,10 @@ class GraphitiMemoryProvider:
 
     def _fact_history(self, entity: str, relationship: str | None = None) -> str:
         try:
-            # Search for all facts about this entity
-            results = _run_sync(self._client.search(
-                query=entity,
-                group_ids=[self._group_id],
-                num_results=50,
-            ))
+            edges: list = self._search_edges(entity, num_results=50)
         except Exception as exc:
             return f"fact_history error: {exc}"
 
-        edges = results if isinstance(results, list) else getattr(results, "edges", [])
         # Filter edges that mention the entity
         entity_lower = entity.lower()
         relevant = [
@@ -400,15 +434,10 @@ class GraphitiMemoryProvider:
 
     def _graph_browse(self, entity: str, depth: int = 1) -> str:
         try:
-            results = _run_sync(self._client.search(
-                query=entity,
-                group_ids=[self._group_id],
-                num_results=20,
-            ))
+            edges: list = self._search_edges(entity, num_results=20)
         except Exception as exc:
             return f"graph_browse error: {exc}"
 
-        edges = results if isinstance(results, list) else getattr(results, "edges", [])
         if not edges:
             return f"No connections found for '{entity}'."
 
@@ -453,11 +482,20 @@ class GraphitiMemoryProvider:
                 reference_time=datetime.now(timezone.utc),
                 group_id=self._group_id,
             ))
-            # Update recall-trigger index with newly extracted entities
-            if self._index and result:
-                new_nodes = getattr(result, "nodes", [])
-                new_edges = getattr(result, "edges", [])
-                if new_nodes or new_edges:
+            if result:
+                new_nodes = getattr(result, "nodes", []) or []
+                new_edges = getattr(result, "edges", []) or []
+
+                # Phase 3: log superseded facts so the user can see what the agent learned.
+                for edge in new_edges:
+                    if getattr(edge, "invalid_at", None):
+                        log.info(
+                            "[graphiti] Superseded: %s",
+                            getattr(edge, "fact", "unknown fact"),
+                        )
+
+                # Update recall-trigger index with newly extracted entities
+                if self._index and (new_nodes or new_edges):
                     self._index.update_from_episode(new_nodes, new_edges)
         except Exception as exc:
             log.warning("graphiti sync_turn ingestion failed: %s", exc)
@@ -508,19 +546,124 @@ class GraphitiMemoryProvider:
     def _build_client(self) -> Any:
         from graphiti_core import Graphiti  # type: ignore[import]
 
-        if self._cfg.backend == "sqlite" or os.environ.get("GRAPHITI_USE_SQLITE"):
-            # SQLite backend — no Docker needed
-            db_path = os.environ.get(
-                "GRAPHITI_SQLITE_PATH",
-                str(Path.home() / ".hermes" / "graphiti.db"),
-            )
-            return Graphiti(database_url=f"sqlite:///{db_path}")
+        llm_client = _build_llm_client()
+        backend = self._cfg.backend
+        use_kuzu = os.environ.get("GRAPHITI_USE_KUZU") or backend == "kuzu"
 
-        return Graphiti(
-            uri=os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687"),
-            user=os.environ.get("GRAPHITI_NEO4J_USER", "neo4j"),
-            password=os.environ.get("GRAPHITI_NEO4J_PASSWORD", "password"),
-        )
+        if use_kuzu:
+            import warnings
+            warnings.warn(
+                "The Kuzu backend for graphiti-core is deprecated and will be removed in a "
+                "future release. Migrate to Neo4j (Docker) or FalkorDB Lite (Python 3.12+).",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            from graphiti_core.driver.kuzu_driver import KuzuDriver  # type: ignore[import]
+            db_path = os.environ.get(
+                "GRAPHITI_KUZU_PATH",
+                str(Path.home() / ".hermes" / "graphiti.kuzu"),
+            )
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+            kuzu_driver = KuzuDriver(db=db_path)
+            _create_kuzu_fts_indices(kuzu_driver)
+            kwargs = {"graph_driver": kuzu_driver}
+            if llm_client:
+                kwargs["llm_client"] = llm_client
+            return Graphiti(**kwargs)
+
+        if backend == "falkordblite":
+            # Requires Python 3.12+ and pip install graphiti-core[falkordblite]
+            from graphiti_core.driver.falkordb_driver import FalkorDriver  # type: ignore[import]
+            kwargs = {"graph_driver": FalkorDriver()}
+            if llm_client:
+                kwargs["llm_client"] = llm_client
+            return Graphiti(**kwargs)
+
+        # Neo4j — default for production / multi-user / gateway deployments
+        kwargs = {
+            "uri": os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687"),
+            "user": os.environ.get("GRAPHITI_NEO4J_USER", "neo4j"),
+            "password": os.environ.get("GRAPHITI_NEO4J_PASSWORD", "password"),
+        }
+        if llm_client:
+            kwargs["llm_client"] = llm_client
+        return Graphiti(**kwargs)
+
+
+    # ------------------------------------------------------------------
+    # Setup wizard
+    # ------------------------------------------------------------------
+
+    def post_setup(self, hermes_home: str, config: dict | None = None) -> None:
+        """Interactive setup wizard called by `hermes setup`.
+
+        Prompts for backend choice and writes the minimum required env vars
+        to ~/.hermes/.env so the plugin works on next launch.
+        """
+        home = Path(hermes_home)
+        env_file = home / ".env"
+
+        print("\n=== Graphiti Temporal Memory Setup ===\n")
+        print("Backend options:")
+        print("  1. neo4j        — Neo4j via Docker (recommended for production)")
+        print("  2. kuzu         — embedded, no Docker, Python 3.11+ (deprecated)")
+        print("  3. falkordblite — embedded, no Docker, Python 3.12+")
+        choice = input("\nChoose backend [1/2/3, default=1]: ").strip() or "1"
+
+        lines: list[str] = []
+
+        if choice == "2":
+            lines.append("GRAPHITI_USE_KUZU=1")
+            db_path = input(
+                f"Kuzu DB path [default: {home / 'graphiti.kuzu'}]: "
+            ).strip() or str(home / "graphiti.kuzu")
+            lines.append(f"GRAPHITI_KUZU_PATH={db_path}")
+            backend_name = "kuzu"
+        elif choice == "3":
+            lines.append("GRAPHITI_BACKEND=falkordblite")
+            backend_name = "falkordblite"
+        else:
+            uri = input("Neo4j URI [default: bolt://localhost:7687]: ").strip() or "bolt://localhost:7687"
+            user = input("Neo4j user [default: neo4j]: ").strip() or "neo4j"
+            password = input("Neo4j password [default: password]: ").strip() or "password"
+            lines += [
+                f"GRAPHITI_NEO4J_URI={uri}",
+                f"GRAPHITI_NEO4J_USER={user}",
+                f"GRAPHITI_NEO4J_PASSWORD={password}",
+            ]
+            backend_name = "neo4j"
+
+        print("\nExtraction LLM (used to extract entities from conversations):")
+        print("  1. inherit  — reuse Hermes's active model (simplest)")
+        print("  2. openai   — dedicated OpenAI key")
+        print("  3. ollama   — local model, nothing leaves device")
+        print("  4. other    — skip (configure manually in config.yaml)")
+        llm_choice = input("\nChoose extraction LLM [1/2/3/4, default=1]: ").strip() or "1"
+
+        if llm_choice == "2":
+            key = input("OPENAI_API_KEY: ").strip()
+            if key:
+                lines.append(f"OPENAI_API_KEY={key}")
+        elif llm_choice == "3":
+            base_url = input("Ollama base URL [default: http://localhost:11434]: ").strip() or "http://localhost:11434"
+            model = input("Ollama model [default: llama3.1:8b]: ").strip() or "llama3.1:8b"
+            lines += [
+                f"GRAPHITI_EXTRACTION_PROVIDER=ollama",
+                f"GRAPHITI_EXTRACTION_MODEL={model}",
+                f"GRAPHITI_EXTRACTION_BASE_URL={base_url}",
+            ]
+
+        # Append to .env (create if missing)
+        existing = env_file.read_text() if env_file.exists() else ""
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+        new_block = "\n# hermes-graphiti\n" + "\n".join(lines) + "\n"
+        env_file.write_text(existing + new_block)
+
+        print(f"\nWrote {len(lines)} variable(s) to {env_file}")
+        print(f"Backend: {backend_name}")
+        print("\nTo activate: set  memory.provider: graphiti  in ~/.hermes/config.yaml")
+        print("or run:  hermes plugins enable graphiti\n")
 
 
 # ------------------------------------------------------------------
@@ -560,6 +703,76 @@ def _strip_fences(text: str) -> str:
         flags=re.DOTALL,
     )
     return text.strip()
+
+
+def _patch_kuzu_database(graphiti_client: Any, group_id: str) -> None:
+    """Set _database on KuzuDriver if absent.
+
+    graphiti.py compares group_id to driver._database before deciding whether
+    to clone the driver. KuzuDriver never assigns _database (graphiti-core bug),
+    so the attribute access throws AttributeError. Setting it to the group_id
+    makes the check a no-op for Kuzu, which is correct: Kuzu is single-file,
+    not per-group, so no driver cloning is ever needed.
+    """
+    try:
+        driver = graphiti_client.driver
+        if "Kuzu" in type(driver).__name__ and not hasattr(driver, "_database"):
+            driver._database = group_id
+    except Exception:
+        pass
+
+
+def _create_kuzu_fts_indices(kuzu_driver: Any) -> None:
+    """Create FTS indices required by Kuzu search operations.
+
+    KuzuDriver.setup_schema() creates node/edge tables but not the FTS indices.
+    KuzuDriver.build_indices_and_constraints() is a no-op (graphiti-core bug).
+    Without these indices, every search call fails with "table doesn't have an
+    index with name edge_name_and_fact" (and similar for other tables).
+
+    Queries mirror graphiti_core.graph_queries.get_fulltext_indices(KUZU).
+    "Already exists" errors on subsequent runs are silently ignored.
+    """
+    try:
+        from graphiti_core.graph_queries import get_fulltext_indices  # type: ignore[import]
+        from graphiti_core.driver.driver import GraphProvider  # type: ignore[import]
+        import kuzu as _kuzu  # type: ignore[import]
+
+        conn = _kuzu.Connection(kuzu_driver.db)
+        for query in get_fulltext_indices(GraphProvider.KUZU):
+            try:
+                conn.execute(query)
+            except Exception as exc:
+                if "already exist" not in str(exc).lower():
+                    log.debug("Kuzu FTS index: %s", exc)
+        conn.close()
+    except Exception as exc:
+        log.warning("Could not create Kuzu FTS indices: %s", exc)
+
+
+def _build_llm_client() -> Any | None:
+    """Build a Graphiti LLMClient from env vars, if GRAPHITI_LLM_MODEL is set.
+
+    Supports any OpenAI-compatible endpoint via OPENAI_BASE_URL — including
+    OpenRouter (https://openrouter.ai/api/v1) for free or cheap models in CI.
+    Returns None to let Graphiti use its default (reads OPENAI_API_KEY itself).
+    """
+    model = os.environ.get("GRAPHITI_LLM_MODEL") or os.environ.get("GRAPHITI_EXTRACTION_MODEL")
+    if not model:
+        return None
+
+    try:
+        from graphiti_core.llm_client.openai_client import OpenAIClient  # type: ignore[import]
+        from graphiti_core.llm_client.config import LLMConfig  # type: ignore[import]
+
+        cfg = LLMConfig(model=model)
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        if base_url:
+            cfg.base_url = base_url
+        return OpenAIClient(cfg)
+    except Exception as exc:
+        log.debug("Could not build custom LLM client (%s); using Graphiti default.", exc)
+        return None
 
 
 def _run_sync(coro: Any) -> Any:
