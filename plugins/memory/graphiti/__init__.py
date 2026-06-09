@@ -222,11 +222,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         if self._cfg.recall_mode == "tools":
             return None
         try:
-            edges: list = _run_sync(self._client.search(
-                query=query,
-                group_ids=[self._group_id],
-                num_results=10,
-            ))
+            edges: list = self._search_edges(query, num_results=10)
         except Exception as exc:
             log.warning("graphiti prefetch failed: %s", exc)
             return None
@@ -331,16 +327,47 @@ class GraphitiMemoryProvider(_MemoryBase):
         return f"Unknown tool: {name}"
 
     # ------------------------------------------------------------------
+    # Internal search helper
+    # ------------------------------------------------------------------
+
+    def _search_edges(self, query: str, num_results: int = 10) -> list:
+        """Run hybrid search; fall back to BM25-only when the embeddings
+        endpoint is unavailable (e.g. OpenRouter proxy doesn't expose /embeddings)."""
+        try:
+            return _run_sync(self._client.search(
+                query=query,
+                group_ids=[self._group_id],
+                num_results=num_results,
+            ))
+        except Exception as exc:
+            if "connection" not in str(exc).lower():
+                raise
+        # Embeddings endpoint unreachable — retry with BM25-only search config.
+        try:
+            from graphiti_core.search.search_config import (
+                EdgeSearchConfig, EdgeSearchMethod, EdgeReranker, SearchConfig,
+            )
+            bm25_cfg = SearchConfig(edge_config=EdgeSearchConfig(
+                search_methods=[EdgeSearchMethod.bm25],
+                reranker=EdgeReranker.rrf,
+            ))
+            bm25_cfg.limit = num_results
+            result = _run_sync(self._client.search_(
+                query=query,
+                group_ids=[self._group_id],
+                config=bm25_cfg,
+            ))
+            return result.edges
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
     # Tool implementations
     # ------------------------------------------------------------------
 
     def _temporal_search(self, query: str, as_of: str | None = None) -> str:
         try:
-            edges: list = _run_sync(self._client.search(
-                query=query,
-                group_ids=[self._group_id],
-                num_results=15,
-            ))
+            edges: list = self._search_edges(query, num_results=15)
         except Exception as exc:
             return f"temporal_search error: {exc}"
 
@@ -370,11 +397,7 @@ class GraphitiMemoryProvider(_MemoryBase):
 
     def _fact_history(self, entity: str, relationship: str | None = None) -> str:
         try:
-            edges: list = _run_sync(self._client.search(
-                query=entity,
-                group_ids=[self._group_id],
-                num_results=50,
-            ))
+            edges: list = self._search_edges(entity, num_results=50)
         except Exception as exc:
             return f"fact_history error: {exc}"
 
@@ -411,11 +434,7 @@ class GraphitiMemoryProvider(_MemoryBase):
 
     def _graph_browse(self, entity: str, depth: int = 1) -> str:
         try:
-            edges: list = _run_sync(self._client.search(
-                query=entity,
-                group_ids=[self._group_id],
-                num_results=20,
-            ))
+            edges: list = self._search_edges(entity, num_results=20)
         except Exception as exc:
             return f"graph_browse error: {exc}"
 
