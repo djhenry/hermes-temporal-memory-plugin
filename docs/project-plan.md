@@ -1,7 +1,7 @@
 # Project Plan: Temporal Knowledge Graph Memory for Hermes Agent
 
 **Approach:** Plugin (preferred) with a fork option for deeper integration  
-**Target stack:** Graphiti + Neo4j (gateway/scale) or SQLite (single-user local) — both ship in one plugin
+**Target stack:** Graphiti + Neo4j (gateway/scale) or Kuzu/FalkorDB Lite (embedded, single-user local) — all ship in one plugin
 **Extraction LLM:** configurable via Hermes's standard provider/config pattern (cloud or local Ollama)
 **Estimated effort:** 7–9 weeks solo, 4–5 weeks with two engineers (added scope: benchmarking, context-fencing, safety hardening)
 
@@ -10,7 +10,7 @@
 ## Settled Decisions
 
 1. **Plugin, not fork.** Confirmed by decision 3 below — coexistence keeps us inside the `MemoryProvider` interface with zero core changes.
-2. **Both backends ship in one plugin.** SQLite is the default for single-user local installs; Neo4j is the default for the messaging gateway and multi-user/scale deployments.
+2. **Both backends ship in one plugin.** Kuzu (embedded, no Docker) is the default for single-user local installs on Python 3.11; FalkorDB Lite is the recommended embedded option on Python 3.12+. Neo4j is the default for the messaging gateway and multi-user/scale deployments.
 3. **Configurable extraction LLM, Hermes-style.** Cloud (OpenAI/Anthropic/Gemini/Groq), local Ollama, or `inherit` from Hermes's active model — selected via config/env, no code changes.
 4. **Additive coexistence with built-in memory (Option B).** The graph is the additive external provider; MEMORY.md/USER.md stay always-on. No migration from another provider is assumed (fresh setup). Division of labor is defined below.
 
@@ -30,7 +30,7 @@ This works well for "remember this fact forever" and "find what we discussed las
 - Multi-hop reasoning ("who introduced me to the running club?") requires chaining facts that are never connected in the current flat structure.
 - There is no concept of *when* a fact was true — no validity window, no supersession tracking.
 
-The article "Building Agent Memory with Knowledge Graphs" (The Neural Maze, June 2026) describes exactly the right solution: a **temporal knowledge graph** that stores entities, relationships, and crucially, the time intervals during which each relationship was valid. Graphiti (from Zep) implements this with incremental episode ingestion, a bi-temporal model, and sub-second hybrid retrieval (vector + BM25 + graph traversal). It runs against Neo4j or a local SQLite-based backend.
+The article "Building Agent Memory with Knowledge Graphs" (The Neural Maze, June 2026) describes exactly the right solution: a **temporal knowledge graph** that stores entities, relationships, and crucially, the time intervals during which each relationship was valid. Graphiti (from Zep) implements this with incremental episode ingestion, a bi-temporal model, and sub-second hybrid retrieval (vector + BM25 + graph traversal). It runs against Neo4j or embedded local backends (Kuzu or FalkorDB Lite).
 
 ---
 
@@ -97,7 +97,7 @@ Hermes already ships eight external memory providers (Honcho, Mem0, Hindsight, H
 - **KR1.1** Plugin implements all `MemoryProvider` lifecycle hooks (`initialize`, `prefetch`, `sync_turn`, `handle_tool_call`, `get_tool_schemas`, `on_memory_write`, `on_session_end`, `system_prompt_block`, `shutdown`) and loads via `hermes plugins enable graphiti`.
 - **KR1.5** After a 5-turn conversation that introduces named entities, MEMORY.md contains a correct, non-empty Temporal Memory Index section; index is stripped from graph ingestion (context-fence test).
 - **KR1.2** Zero modifications to any file outside `plugins/memory/graphiti/` (verified by diff against upstream).
-- **KR1.3** Both backends functional: Neo4j (Docker) and SQLite (offline, no Docker).
+- **KR1.3** All backends functional: Neo4j (Docker), Kuzu (embedded, Python 3.11), and FalkorDB Lite (embedded, Python 3.12+).
 - **KR1.4** `pip install hermes-graphiti` works on macOS and Linux; `hermes setup` offers it via `post_setup`.
 
 ### Objective 2 — Beat the built-in FTS5 memory on temporal and relational recall
@@ -127,14 +127,14 @@ Hermes already ships eight external memory providers (Honcho, Mem0, Hindsight, H
 
 ### Phase 0 — Research & Environment (Week 1)
 
-**Goals:** Understand the full Graphiti API; validate that Neo4j and the SQLite backend both work locally; confirm the MemoryProvider hook surface is sufficient.
+**Goals:** Understand the full Graphiti API; validate that Neo4j and the embedded backends (Kuzu, FalkorDB Lite) all work locally; confirm the MemoryProvider hook surface is sufficient.
 
 Tasks:
 - Clone `NousResearch/hermes-agent`; read `agent/memory_provider.py`, `agent/memory_manager.py`, and the Honcho plugin (`plugins/memory/honcho/`) as a reference implementation.
 - Stand up Neo4j via Docker Compose (the Neural Maze article includes a working Compose file). Run the Graphiti quickstart; ingest a few episodes and run hybrid searches.
 - Map each Graphiti operation (`client.add_episode`, `client.search`, `client.get_entity`) to the corresponding MemoryProvider hook.
 - Identify any gaps: does `prefetch` fire early enough to inject context before the system prompt is frozen? (If not, flag for a hook proposal to Nous Research.)
-- Decide on the local fallback: Graphiti supports a SQLite-backed store (`graphiti-core[sqlite]`) which removes the Neo4j Docker dependency for lightweight installs.
+- Decide on the local fallback: Graphiti supports embedded stores: Kuzu (`graphiti-core[kuzu]`, deprecated, Python 3.11+) for offline development and FalkorDB Lite (`graphiti-core[falkordblite]`, Python 3.12+) for production-quality local storage.
 
 Deliverable: a one-page technical note confirming the approach or recommending the fork path.
 
@@ -318,13 +318,14 @@ Deliverable: entity resolution and supersession tests pass; `fact_history` shows
 
 ### Phase 4 — Local / Offline Mode (Week 6)
 
-**Goals:** The plugin works without Docker or a network connection, using Graphiti's SQLite backend.
+**Goals:** The plugin works without Docker or a network connection, using Graphiti's embedded Kuzu backend (or FalkorDB Lite on Python 3.12+).
 
 Tasks:
-- Test `graphiti-core[sqlite]` for all operations used in Phases 1–3.
-- Add `GRAPHITI_USE_SQLITE=1` env var path in `initialize`; default DB path to `~/.hermes/graphiti.db`.
-- Document the performance trade-off (SQLite is slower for large graphs; recommend Neo4j above ~50K episodes).
-- Add `hermes graphiti migrate --to neo4j` CLI command that exports SQLite graph to Neo4j for users who outgrow the local store.
+- Test `graphiti-core[kuzu]` for all operations used in Phases 1–3. (FalkorDB Lite (`graphiti-core[falkordblite]`) is the Python 3.12+ alternative and should be tested on that runtime.)
+- Add `GRAPHITI_USE_KUZU=1` env var path in `initialize`; default DB path to `~/.hermes/graphiti.kuzu`.
+- Document the performance trade-off (Kuzu is slower for large graphs; recommend Neo4j above ~50K episodes).
+- Add `hermes graphiti migrate --to neo4j` CLI command that exports Kuzu graph to Neo4j for users who outgrow the local store.
+- Note: Kuzu is deprecated upstream. FalkorDB Lite (`GRAPHITI_USE_FALKORDBLITE=1`, Python 3.12+) is the recommended embedded option going forward.
 
 Deliverable: full plugin functionality with no external services; Docker only needed for Neo4j mode.
 
@@ -383,7 +384,7 @@ MemoryManager.sync_turn(user, assistant, messages)
           Entity resolution + supersession
                │
                ▼
-          Neo4j / SQLite graph updated
+          Neo4j / Kuzu / FalkorDB Lite graph updated
 ```
 
 ---
@@ -392,22 +393,24 @@ MemoryManager.sync_turn(user, assistant, messages)
 
 Following Hermes conventions: the setup wizard prompts only for the minimum (backend choice + API key), and everything else lives in a config reference (`$HERMES_HOME/graphiti.json`) plus `config.yaml`. Secrets go in `~/.hermes/.env`.
 
-**Backend (both ship; default chosen by deployment):**
+**Backend (all ship; default chosen by deployment):**
 ```yaml
 # ~/.hermes/config.yaml
 memory:
   provider: graphiti
 plugins:
   graphiti:
-    backend: sqlite          # default for single-user local; no Docker
-    # backend: neo4j         # default for gateway / multi-user / scale
+    backend: neo4j          # default; use kuzu or falkordblite for embedded/offline
+    # backend: kuzu         # embedded, no Docker, Python 3.11+ (deprecated upstream)
+    # backend: falkordblite # embedded, no Docker, Python 3.12+
     recall_mode: hybrid      # hybrid | context | tools  (Lesson 7)
     disable_builtin_memory_tool: false   # Lesson 5
     semaphore_limit: 5       # Graphiti ingestion concurrency (Lesson 10)
     max_recall_tokens: 600
 ```
-- **SQLite** is the default for single-user local installs — zero external services, DB at `~/.hermes/graphiti.db`.
-- **Neo4j** is the default for the messaging gateway and any multi-user or large-graph deployment. `hermes graphiti migrate --to neo4j` promotes a local graph when a user outgrows SQLite.
+- **Kuzu** is the no-Docker default for single-user local installs on Python 3.11 — zero external services, DB at `~/.hermes/graphiti.kuzu`. Note: Kuzu is deprecated upstream.
+- **FalkorDB Lite** is the recommended embedded option on Python 3.12+ — production-quality, no Docker.
+- **Neo4j** is the default for the messaging gateway and any multi-user or large-graph deployment. `hermes graphiti migrate --to neo4j` promotes a local graph when a user outgrows an embedded backend.
 
 **Extraction LLM (configurable, Hermes-style):**
 
@@ -434,7 +437,8 @@ Graphiti needs an LLM for entity/relationship extraction and a model for embeddi
 |---|---|---|
 | `graphiti-core` | Temporal KG engine, episode ingestion, hybrid search | Apache 2.0 |
 | `neo4j` (Python driver) | Neo4j connection (gateway/scale backend) | Apache 2.0 |
-| `graphiti-core[sqlite]` | Local single-user backend, no Docker needed | Apache 2.0 |
+| `graphiti-core[kuzu]` | Embedded local backend (deprecated, Python 3.11+) | Apache 2.0 |
+| `graphiti-core[falkordblite]` | Embedded local backend, Python 3.12+ | Apache 2.0 |
 
 Optional, for local extraction: an Ollama install (no Python dependency — reached over HTTP). No changes to `requirements.txt` in the core repo — all dependencies declared in the plugin's own `pyproject.toml`.
 
@@ -449,7 +453,7 @@ Optional, for local extraction: an Ollama install (no Python dependency — reac
 | Adversarial/poisoned facts surface in a later prompt | Medium | Treat all stored content as untrusted; sanitize on output, scrub raw tool output before storing (Lesson 3) |
 | Built-in `memory` tool out-competes our tools, leaving them unused | Medium | Recall-trigger index in MEMORY.md + `system_prompt_block()` instruction bridges both tools; `disable_builtin_memory_tool` flag retained as power-user escape hatch only (Lesson 5) |
 | Graphiti entity extraction misses implicit relationships | Medium | Log missed extractions; expose `fact_correct` tool for user corrections |
-| Neo4j Docker dependency is too heavy for typical Hermes users | High | SQLite mode (Phase 4) is the default; Neo4j is opt-in for power users |
+| Neo4j Docker dependency is too heavy for typical Hermes users | High | Kuzu mode (Phase 4) is the no-Docker default for Python 3.11; FalkorDB Lite for Python 3.12+. |
 | LLM 429 rate-limit errors during high-throughput ingestion | Medium | Expose and conservatively default `SEMAPHORE_LIMIT` (Lesson 10) |
 | Sending conversation content to a cloud LLM for extraction is unacceptable for some users | Medium | Support local extraction via Ollama; document clearly what leaves the device (KR4.1) |
 | Plugin hook surface insufficient for system-prompt-level context | Low | By design we inject at the user-message level (Lesson 2), which is sufficient; raise an upstream issue only if proven otherwise |
@@ -464,5 +468,5 @@ Quantitative targets live in the Objectives & Key Results above. The project is 
 - A 30-turn conversation builds a knowledge graph visible node-by-node in Neo4j Browser.
 - After an in-conversation city move, `prefetch("where do I live")` returns only the current city, and `fact_history("user", "LIVES_IN")` shows both cities with correct validity windows.
 - Two people sharing a first name, introduced in different contexts, resolve to separate nodes.
-- The same conversation runs identically on the SQLite backend with no Docker.
+- The same conversation runs identically on the Kuzu backend (or FalkorDB Lite on Python 3.12+) with no Docker.
 - `git diff` against upstream shows zero changes outside `plugins/memory/graphiti/`.
