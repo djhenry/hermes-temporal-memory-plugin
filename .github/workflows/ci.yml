@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/*"]
+  pull_request:
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install plugin (no hermes-agent needed for unit tests)
+        run: pip install -e ".[dev]" -q
+
+      - name: Unit tests
+        run: python3 -m pytest tests/test_memory_index.py -v
+
+  integration:
+    name: Integration tests (mock backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install hermes-agent + plugin
+        run: make install
+
+      - name: Integration tests
+        run: python3 -m pytest tests/integration/ -v -m "not live"

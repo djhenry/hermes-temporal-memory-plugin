@@ -24,6 +24,11 @@ from .memory_index import MemoryIndexManager
 
 log = logging.getLogger(__name__)
 
+try:
+    from agent.memory_provider import MemoryProvider as _MemoryBase  # type: ignore[import]
+except ImportError:
+    _MemoryBase = object  # running outside Hermes (tests, standalone)
+
 # Tool JSON schemas -------------------------------------------------------
 
 TEMPORAL_SEARCH_SCHEMA = {
@@ -123,7 +128,7 @@ SYSTEM_PROMPT_BLOCK = (
 # -------------------------------------------------------------------------
 
 
-class GraphitiMemoryProvider:
+class GraphitiMemoryProvider(_MemoryBase):
     """Hermes MemoryProvider backed by Graphiti temporal knowledge graph."""
 
     name = "graphiti"
@@ -267,8 +272,9 @@ class GraphitiMemoryProvider:
     # ------------------------------------------------------------------
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
-        # Mirror to graph (tagged as source: memory_tool per Lesson 9)
-        if action in ("add", "replace") and (content or "").strip():
+        # Mirror episodic memory writes to graph (Lesson 9).
+        # USER.md writes are profile data, not episodic — skip them.
+        if action in ("add", "replace") and target == "memory" and (content or "").strip():
             threading.Thread(
                 target=self._mirror_memory_write,
                 args=(action, target, content),
