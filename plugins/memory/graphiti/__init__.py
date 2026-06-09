@@ -554,6 +554,82 @@ class GraphitiMemoryProvider(_MemoryBase):
         )
 
 
+    # ------------------------------------------------------------------
+    # Setup wizard
+    # ------------------------------------------------------------------
+
+    def post_setup(self, hermes_home: str, config: dict | None = None) -> None:
+        """Interactive setup wizard called by `hermes setup`.
+
+        Prompts for backend choice and writes the minimum required env vars
+        to ~/.hermes/.env so the plugin works on next launch.
+        """
+        home = Path(hermes_home)
+        env_file = home / ".env"
+
+        print("\n=== Graphiti Temporal Memory Setup ===\n")
+        print("Backend options:")
+        print("  1. neo4j        — Neo4j via Docker (recommended for production)")
+        print("  2. kuzu         — embedded, no Docker, Python 3.11+ (deprecated)")
+        print("  3. falkordblite — embedded, no Docker, Python 3.12+")
+        choice = input("\nChoose backend [1/2/3, default=1]: ").strip() or "1"
+
+        lines: list[str] = []
+
+        if choice == "2":
+            lines.append("GRAPHITI_USE_KUZU=1")
+            db_path = input(
+                f"Kuzu DB path [default: {home / 'graphiti.kuzu'}]: "
+            ).strip() or str(home / "graphiti.kuzu")
+            lines.append(f"GRAPHITI_KUZU_PATH={db_path}")
+            backend_name = "kuzu"
+        elif choice == "3":
+            lines.append("GRAPHITI_BACKEND=falkordblite")
+            backend_name = "falkordblite"
+        else:
+            uri = input("Neo4j URI [default: bolt://localhost:7687]: ").strip() or "bolt://localhost:7687"
+            user = input("Neo4j user [default: neo4j]: ").strip() or "neo4j"
+            password = input("Neo4j password [default: password]: ").strip() or "password"
+            lines += [
+                f"GRAPHITI_NEO4J_URI={uri}",
+                f"GRAPHITI_NEO4J_USER={user}",
+                f"GRAPHITI_NEO4J_PASSWORD={password}",
+            ]
+            backend_name = "neo4j"
+
+        print("\nExtraction LLM (used to extract entities from conversations):")
+        print("  1. inherit  — reuse Hermes's active model (simplest)")
+        print("  2. openai   — dedicated OpenAI key")
+        print("  3. ollama   — local model, nothing leaves device")
+        print("  4. other    — skip (configure manually in config.yaml)")
+        llm_choice = input("\nChoose extraction LLM [1/2/3/4, default=1]: ").strip() or "1"
+
+        if llm_choice == "2":
+            key = input("OPENAI_API_KEY: ").strip()
+            if key:
+                lines.append(f"OPENAI_API_KEY={key}")
+        elif llm_choice == "3":
+            base_url = input("Ollama base URL [default: http://localhost:11434]: ").strip() or "http://localhost:11434"
+            model = input("Ollama model [default: llama3.1:8b]: ").strip() or "llama3.1:8b"
+            lines += [
+                f"GRAPHITI_EXTRACTION_PROVIDER=ollama",
+                f"GRAPHITI_EXTRACTION_MODEL={model}",
+                f"GRAPHITI_EXTRACTION_BASE_URL={base_url}",
+            ]
+
+        # Append to .env (create if missing)
+        existing = env_file.read_text() if env_file.exists() else ""
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+        new_block = "\n# hermes-graphiti\n" + "\n".join(lines) + "\n"
+        env_file.write_text(existing + new_block)
+
+        print(f"\nWrote {len(lines)} variable(s) to {env_file}")
+        print(f"Backend: {backend_name}")
+        print("\nTo activate: set  memory.provider: graphiti  in ~/.hermes/config.yaml")
+        print("or run:  hermes plugins enable graphiti\n")
+
+
 # ------------------------------------------------------------------
 # Hermes plugin entry point
 # ------------------------------------------------------------------

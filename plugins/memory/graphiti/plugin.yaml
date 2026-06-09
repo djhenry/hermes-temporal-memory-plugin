@@ -18,6 +18,7 @@ hooks:
   - on_session_end
   - system_prompt_block
   - shutdown
+  - post_setup
 entrypoint: plugins.memory.graphiti:register
 backends:
   - neo4j        # primary — Docker/cloud, recommended for production
