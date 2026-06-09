@@ -48,7 +48,7 @@ jobs:
       # OpenRouter is OpenAI-API-compatible — point the base URL and use any free model.
       OPENAI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       OPENAI_BASE_URL: https://openrouter.ai/api/v1
-      GRAPHITI_EXTRACTION_MODEL: mistralai/mistral-7b-instruct:free
+      GRAPHITI_EXTRACTION_MODEL: openrouter/free
     steps:
       - uses: actions/checkout@v4
 
