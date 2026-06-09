@@ -94,7 +94,8 @@ Hermes already ships eight external memory providers (Honcho, Mem0, Hindsight, H
 
 ### Objective 1 — Ship a self-hostable temporal-memory plugin with zero core changes
 
-- **KR1.1** Plugin implements all `MemoryProvider` lifecycle hooks (`initialize`, `prefetch`, `sync_turn`, `handle_tool_call`, `get_tool_schemas`, `shutdown`) and loads via `hermes plugins enable graphiti`.
+- **KR1.1** Plugin implements all `MemoryProvider` lifecycle hooks (`initialize`, `prefetch`, `sync_turn`, `handle_tool_call`, `get_tool_schemas`, `on_memory_write`, `on_session_end`, `system_prompt_block`, `shutdown`) and loads via `hermes plugins enable graphiti`.
+- **KR1.5** After a 5-turn conversation that introduces named entities, MEMORY.md contains a correct, non-empty Temporal Memory Index section; index is stripped from graph ingestion (context-fence test).
 - **KR1.2** Zero modifications to any file outside `plugins/memory/graphiti/` (verified by diff against upstream).
 - **KR1.3** Both backends functional: Neo4j (Docker) and SQLite (offline, no Docker).
 - **KR1.4** `pip install hermes-graphiti` works on macOS and Linux; `hermes setup` offers it via `post_setup`.
@@ -253,17 +254,35 @@ Key implementation work:
 - Arguments: `entity: str`, `depth: int` (1–3).
 - Returns the neighborhood of an entity in the graph — useful for multi-hop questions the agent can answer by inspection.
 
-**MEMORY.md coexistence & division of labor (Option B)**
+**MEMORY.md coexistence & division of labor (Option B — recall-trigger index)**
 
-Because both memory systems run together, each needs a clear, non-overlapping job — otherwise they contradict each other and the agent gets confused about which to trust:
+The two memory layers have complementary, non-overlapping jobs:
 
-- **Built-in MEMORY.md / USER.md** owns a tiny set of always-on, must-never-miss facts (the user's name, core preferences, current critical context). These stay woven into the system prompt from the first token, with zero retrieval latency. This is the safety net: if the graph is unreachable or `prefetch` misses, the essentials are still present.
-- **Temporal graph** owns the rich, relational, time-varying web — people, places, projects, how they connect, and how they've changed. This is retrieved per turn via `prefetch` and queried via the temporal tools.
+- **Built-in MEMORY.md / USER.md** owns a tiny set of always-on, must-never-miss facts (the user's name, core preferences, current critical context) **plus a plugin-maintained Temporal Memory Index section** — a brief topic catalog that tells the agent what is retrievable from the deep graph.
+- **Temporal graph** owns the rich, relational, time-varying web — people, places, projects, how they connect, and how they've changed. Retrieved per turn via `prefetch` and queried via the temporal tools.
+
+**The recall-trigger index** is a fenced section the plugin owns inside MEMORY.md:
+
+```
+<!-- graphiti-index:start -->
+## Temporal Memory Index
+_Updated 2026-06-09 · query deeper: temporal_search, fact_history, graph_browse_
+
+**People:** Marta Kovač (colleague), Marta Ruiz (running club, via Jaime)
+**Places:** Madrid (2026-03 → now) · history available
+**Projects:** Helios (active), Atlas (archived 2025-11)
+<!-- graphiti-index:end -->
+```
+
+The agent sees this in every system prompt and knows which topics have richer history in the graph. `system_prompt_block()` adds a one-time instruction: *"Do not edit the Temporal Memory Index section; use temporal_search, fact_history, or graph_browse for depth."*
 
 Implementation:
-- On `initialize`, read existing MEMORY.md/USER.md entries and ingest them as a synthetic episode so the historical record is preserved in the graph too.
-- On `sync_turn`, when the assistant calls the built-in memory tool (write/replace/remove), mirror that write into the graph as an explicit fact tagged `source: memory_tool` (Lesson 9). The graph is a superset; MEMORY.md is the always-on subset.
-- **Resolve tool competition (Lesson 5).** The LLM tends to prefer the built-in `memory` tool over provider tools. Keep `disable_builtin_memory_tool` *off* by default (true Option B coexistence), but document that power users who want the graph to be the single write target can flip it on. Note this is distinct from Option A — even with the flag on, MEMORY.md still provides always-on read context; only the *write* path consolidates.
+- On `initialize`, seed the index from existing graph entities via `get_by_group_ids()`.
+- On `sync_turn`, after episode ingestion passes `AddEpisodeResults.nodes/edges` to `MemoryIndexManager.update_from_episode()` inside the existing daemon thread (no extra latency).
+- On `on_memory_write` (new hook), mirror the write to the graph (`source: memory_tool`, Lesson 9) **and** call `MemoryIndexManager.on_memory_write()` to add a teaser stub for new entities. If the LLM tries to remove the index entry, re-seed it immediately.
+- On `on_session_end` (new hook), call `MemoryIndexManager.full_refresh()` with community summaries from `build_communities()` for richer topic-cluster names.
+- **Context fencing (KR3.3):** the index section (`<!-- graphiti-index:start/end -->`) is stripped from episode bodies before ingestion, alongside the `<memory-context>` block, so the graph never re-ingests its own recalled output.
+- **Tool competition (Lesson 5):** resolved by collaboration, not suppression. `disable_builtin_memory_tool` remains an optional power-user escape hatch only. The index bridge makes the tools complementary — the LLM uses the built-in tool for atomic facts and the temporal tools for depth queries.
 
 Deliverable: a conversation of 20 turns creates a visible knowledge graph in Neo4j Browser; prefetch returns temporally-correct facts; `temporal_search` and `fact_history` work from the CLI.
 
@@ -428,7 +447,7 @@ Optional, for local extraction: an Ollama install (no Python dependency — reac
 | Graphiti ingestion latency (0.5–2s per turn) blocks the UX | Medium | Run `sync_turn` in a daemon thread; agent reply is never delayed by graph writes (Lesson 4) |
 | Recursive memory pollution — graph re-ingests its own injected context | High | Context-fence: strip the injected `<memory-context>` block before ingestion (Lesson 1); add the 50-turn regression test in KR3.3 |
 | Adversarial/poisoned facts surface in a later prompt | Medium | Treat all stored content as untrusted; sanitize on output, scrub raw tool output before storing (Lesson 3) |
-| Built-in `memory` tool out-competes our tools, leaving them unused | Medium | `disable_builtin_memory_tool` config flag with documented trade-off (Lesson 5) |
+| Built-in `memory` tool out-competes our tools, leaving them unused | Medium | Recall-trigger index in MEMORY.md + `system_prompt_block()` instruction bridges both tools; `disable_builtin_memory_tool` flag retained as power-user escape hatch only (Lesson 5) |
 | Graphiti entity extraction misses implicit relationships | Medium | Log missed extractions; expose `fact_correct` tool for user corrections |
 | Neo4j Docker dependency is too heavy for typical Hermes users | High | SQLite mode (Phase 4) is the default; Neo4j is opt-in for power users |
 | LLM 429 rate-limit errors during high-throughput ingestion | Medium | Expose and conservatively default `SEMAPHORE_LIMIT` (Lesson 10) |
