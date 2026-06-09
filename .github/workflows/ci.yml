@@ -60,4 +60,4 @@ jobs:
         run: pip install -e ".[kuzu,dev]" -q && make install-hermes
 
       - name: Live integration tests
-        run: python3 -m pytest tests/integration/ -v -m "live" --timeout=120
+        run: python3 -m pytest tests/integration/ -v -m "live" --timeout=180

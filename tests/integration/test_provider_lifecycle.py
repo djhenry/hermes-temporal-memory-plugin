@@ -316,7 +316,7 @@ class TestLiveGraphiti:
             "Noted — I'll remember you're in Madrid now.",
         )
         if p._sync_thread:
-            p._sync_thread.join(timeout=30)
+            p._sync_thread.join(timeout=90)  # free-tier models can be slow
 
         result = p.prefetch("where do I live")
         assert result is not None
