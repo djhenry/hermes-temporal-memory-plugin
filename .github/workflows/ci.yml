@@ -39,12 +39,12 @@ jobs:
         run: python3 -m pytest tests/integration/ -v -m "not live"
 
   live:
-    name: Live tests (Kuzu + OpenRouter)
+    name: Live tests (FalkorDB Lite + OpenRouter)
     runs-on: ubuntu-latest
     # Forks and dependabot PRs won't have the secret — the test itself skips
     # gracefully when OPENAI_API_KEY is empty (pytest.skip inside the test).
     env:
-      GRAPHITI_USE_KUZU: "1"
+      GRAPHITI_USE_FALKORDB_LITE: "1"
       # OpenRouter is OpenAI-API-compatible — point the base URL and use any free model.
       OPENAI_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       OPENAI_BASE_URL: https://openrouter.ai/api/v1
@@ -54,10 +54,10 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
-      - name: Install plugin with Kuzu backend
-        run: pip install -e ".[kuzu,dev]" -q && make install-hermes
+      - name: Install plugin with FalkorDB Lite backend
+        run: pip install -e ".[falkordblite,dev]" -q && make install-hermes
 
       - name: Live integration tests
         run: python3 -m pytest tests/integration/ -v -m "live" --timeout=180 -s --log-cli-level=WARNING

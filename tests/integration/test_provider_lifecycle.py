@@ -72,7 +72,7 @@ def mock_client():
 
 @pytest.fixture
 def provider(mock_client, hermes_home, monkeypatch):
-    monkeypatch.setenv("GRAPHITI_USE_KUZU", "1")
+    monkeypatch.setenv("GRAPHITI_USE_FALKORDB_LITE", "1")
     with patch.object(GraphitiMemoryProvider, "_build_client", return_value=mock_client):
         p = GraphitiMemoryProvider()
         p.initialize("sess-001", identity="testuser", hermes_home=str(hermes_home))
@@ -84,14 +84,14 @@ def provider(mock_client, hermes_home, monkeypatch):
 
 class TestInit:
     def test_group_id_uses_identity(self, mock_client, hermes_home, monkeypatch):
-        monkeypatch.setenv("GRAPHITI_USE_KUZU", "1")
+        monkeypatch.setenv("GRAPHITI_USE_FALKORDB_LITE", "1")
         with patch.object(GraphitiMemoryProvider, "_build_client", return_value=mock_client):
             p = GraphitiMemoryProvider()
             p.initialize("s1", identity="alice", hermes_home=str(hermes_home))
         assert p._group_id == "hermes-alice"
 
     def test_group_id_appends_platform_user(self, mock_client, hermes_home, monkeypatch):
-        monkeypatch.setenv("GRAPHITI_USE_KUZU", "1")
+        monkeypatch.setenv("GRAPHITI_USE_FALKORDB_LITE", "1")
         source = SimpleNamespace(user_id="tg-99")
         with patch.object(GraphitiMemoryProvider, "_build_client", return_value=mock_client):
             p = GraphitiMemoryProvider()
@@ -99,12 +99,13 @@ class TestInit:
                          hermes_home=str(hermes_home))
         assert p._group_id == "hermes-alice-tg-99"
 
-    def test_is_available_true_when_kuzu_env_set(self, monkeypatch):
-        monkeypatch.setenv("GRAPHITI_USE_KUZU", "1")
+    def test_is_available_true_when_falkordblite_env_set(self, monkeypatch):
+        monkeypatch.setenv("GRAPHITI_USE_FALKORDB_LITE", "1")
         assert GraphitiMemoryProvider().is_available() is True
 
     def test_is_available_false_when_nothing_configured(self, monkeypatch):
         monkeypatch.delenv("GRAPHITI_USE_KUZU", raising=False)
+        monkeypatch.delenv("GRAPHITI_USE_FALKORDB_LITE", raising=False)
         monkeypatch.delenv("GRAPHITI_NEO4J_URI", raising=False)
         p = GraphitiMemoryProvider()
         p._cfg.backend = "neo4j"  # prevent sqlite-default from triggering
@@ -320,18 +321,17 @@ class TestLiveGraphiti:
         )
 
         # Verify the LLM actually extracted relationship edges.
-        # _ingest_turn swallows exceptions silently; a direct graph query tells
-        # us whether add_episode produced any data to search over.
+        # _ingest_turn swallows exceptions silently; querying via the public
+        # Graphiti API tells us whether add_episode produced any data to search over.
         from plugins.memory.graphiti import _run_sync
-        rows, _, _ = _run_sync(p._client.driver.execute_query(
-            "MATCH (n:Entity)-[:RELATES_TO]->(e:RelatesToNode_)-[:RELATES_TO]->(m:Entity) "
-            "WHERE e.group_id = $gid RETURN e.fact AS fact, e.name AS name",
-            gid=p._group_id,
-        ))
-        print(f"\n[live-test] edges extracted by LLM: {len(rows)}")
-        for row in rows[:5]:
-            print(f"  edge: name={row.get('name')!r}  fact={row.get('fact')!r}")
-        if not rows:
+        edges_in_graph = _run_sync(p._client.edges.entity.get_by_group_ids(
+            group_ids=[p._group_id],
+            limit=20,
+        )) or []
+        print(f"\n[live-test] edges extracted by LLM: {len(edges_in_graph)}")
+        for e in edges_in_graph[:5]:
+            print(f"  edge: name={getattr(e, 'name', '?')!r}  fact={getattr(e, 'fact', '?')!r}")
+        if not edges_in_graph:
             pytest.skip(
                 "openrouter/free model extracted 0 relationship edges — "
                 "Graphiti's JSON extraction prompt not supported by the current "
