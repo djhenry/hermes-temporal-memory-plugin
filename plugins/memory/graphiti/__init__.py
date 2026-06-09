@@ -545,7 +545,9 @@ class GraphitiMemoryProvider(_MemoryBase):
                 str(Path.home() / ".hermes" / "graphiti.kuzu"),
             )
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-            kwargs = {"graph_driver": KuzuDriver(db=db_path)}
+            kuzu_driver = KuzuDriver(db=db_path)
+            _create_kuzu_fts_indices(kuzu_driver)
+            kwargs = {"graph_driver": kuzu_driver}
             if llm_client:
                 kwargs["llm_client"] = llm_client
             return Graphiti(**kwargs)
@@ -701,6 +703,34 @@ def _patch_kuzu_database(graphiti_client: Any, group_id: str) -> None:
         pass
 
 
+def _create_kuzu_fts_indices(kuzu_driver: Any) -> None:
+    """Create FTS indices required by Kuzu search operations.
+
+    KuzuDriver.setup_schema() creates node/edge tables but not the FTS indices.
+    KuzuDriver.build_indices_and_constraints() is a no-op (graphiti-core bug).
+    Without these indices, every search call fails with "table doesn't have an
+    index with name edge_name_and_fact" (and similar for other tables).
+
+    Queries mirror graphiti_core.graph_queries.get_fulltext_indices(KUZU).
+    "Already exists" errors on subsequent runs are silently ignored.
+    """
+    try:
+        from graphiti_core.graph_queries import get_fulltext_indices  # type: ignore[import]
+        from graphiti_core.driver.driver import GraphProvider  # type: ignore[import]
+        import kuzu as _kuzu  # type: ignore[import]
+
+        conn = _kuzu.Connection(kuzu_driver.db)
+        for query in get_fulltext_indices(GraphProvider.KUZU):
+            try:
+                conn.execute(query)
+            except Exception as exc:
+                if "already exist" not in str(exc).lower():
+                    log.debug("Kuzu FTS index: %s", exc)
+        conn.close()
+    except Exception as exc:
+        log.warning("Could not create Kuzu FTS indices: %s", exc)
+
+
 def _build_llm_client() -> Any | None:
     """Build a Graphiti LLMClient from env vars, if GRAPHITI_LLM_MODEL is set.
 
@@ -708,7 +738,7 @@ def _build_llm_client() -> Any | None:
     OpenRouter (https://openrouter.ai/api/v1) for free or cheap models in CI.
     Returns None to let Graphiti use its default (reads OPENAI_API_KEY itself).
     """
-    model = os.environ.get("GRAPHITI_LLM_MODEL")
+    model = os.environ.get("GRAPHITI_LLM_MODEL") or os.environ.get("GRAPHITI_EXTRACTION_MODEL")
     if not model:
         return None
 
