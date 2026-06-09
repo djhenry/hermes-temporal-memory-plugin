@@ -540,6 +540,7 @@ class GraphitiMemoryProvider(_MemoryBase):
                 "GRAPHITI_KUZU_PATH",
                 str(Path.home() / ".hermes" / "graphiti.kuzu"),
             )
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             kwargs = {"graph_driver": KuzuDriver(db=db_path)}
             if llm_client:
                 kwargs["llm_client"] = llm_client
