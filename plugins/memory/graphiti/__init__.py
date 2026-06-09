@@ -170,6 +170,10 @@ class GraphitiMemoryProvider(_MemoryBase):
 
         self._client = self._build_client()
 
+        # KuzuDriver never sets _database (graphiti-core bug); patch it here so
+        # graphiti.py's `group_id != driver._database` check doesn't throw.
+        _patch_kuzu_database(self._client, self._group_id)
+
         # Create graph indices/constraints (no-op for Kuzu; required for Neo4j/FalkorDB).
         try:
             _run_sync(self._client.build_indices_and_constraints())
@@ -678,6 +682,23 @@ def _strip_fences(text: str) -> str:
         flags=re.DOTALL,
     )
     return text.strip()
+
+
+def _patch_kuzu_database(graphiti_client: Any, group_id: str) -> None:
+    """Set _database on KuzuDriver if absent.
+
+    graphiti.py compares group_id to driver._database before deciding whether
+    to clone the driver. KuzuDriver never assigns _database (graphiti-core bug),
+    so the attribute access throws AttributeError. Setting it to the group_id
+    makes the check a no-op for Kuzu, which is correct: Kuzu is single-file,
+    not per-group, so no driver cloning is ever needed.
+    """
+    try:
+        driver = graphiti_client.driver
+        if "Kuzu" in type(driver).__name__ and not hasattr(driver, "_database"):
+            driver._database = group_id
+    except Exception:
+        pass
 
 
 def _build_llm_client() -> Any | None:
