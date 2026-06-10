@@ -140,6 +140,35 @@ class GraphitiMemoryProvider(_MemoryBase):
         self._index: MemoryIndexManager | None = None
         self._sync_thread: threading.Thread | None = None
         self._sync_lock = threading.Lock()
+        # Persistent event loop for async client calls.
+        # FalkorDB Lite's asyncio-based Redis client binds connections to the
+        # event loop it's first used on. asyncio.run() creates-then-closes a
+        # new loop on every call, so the second call finds the connection's
+        # loop closed. A single long-lived loop avoids this entirely.
+        self._async_loop: Any = None
+        self._async_thread: threading.Thread | None = None
+
+    # ------------------------------------------------------------------
+    # Async loop management
+    # ------------------------------------------------------------------
+
+    def _start_async_loop(self) -> None:
+        import asyncio
+        self._async_loop = asyncio.new_event_loop()
+        self._async_thread = threading.Thread(
+            target=self._async_loop.run_forever,
+            daemon=True,
+            name="graphiti-async",
+        )
+        self._async_thread.start()
+
+    def _run(self, coro: Any) -> Any:
+        """Run a coroutine on the provider's persistent event loop."""
+        import asyncio
+        import concurrent.futures
+        if self._async_loop and self._async_loop.is_running():
+            return asyncio.run_coroutine_threadsafe(coro, self._async_loop).result()
+        return _run_sync(coro)
 
     # ------------------------------------------------------------------
     # Discovery
@@ -169,6 +198,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         user_suffix = f"-{source.user_id}" if source and getattr(source, "user_id", None) else ""
         self._group_id = f"hermes-{identity}{user_suffix}"
 
+        self._start_async_loop()
         self._client = self._build_client()
 
         # KuzuDriver never sets _database (graphiti-core bug); patch it here so
@@ -177,7 +207,7 @@ class GraphitiMemoryProvider(_MemoryBase):
 
         # Create graph indices/constraints (no-op for Kuzu; required for Neo4j/FalkorDB).
         try:
-            _run_sync(self._client.build_indices_and_constraints())
+            self._run(self._client.build_indices_and_constraints())
         except Exception as exc:
             log.warning("graphiti build_indices_and_constraints failed (continuing): %s", exc)
 
@@ -202,9 +232,11 @@ class GraphitiMemoryProvider(_MemoryBase):
             self._sync_thread.join(timeout=5)
         if self._client:
             try:
-                _run_sync(self._client.close())
+                self._run(self._client.close())
             except Exception:
                 pass
+        if self._async_loop and self._async_loop.is_running():
+            self._async_loop.call_soon_threadsafe(self._async_loop.stop)
 
     # ------------------------------------------------------------------
     # System prompt
@@ -440,7 +472,7 @@ class GraphitiMemoryProvider(_MemoryBase):
 
     def _fact_correct(self, entity: str, relationship: str, correction: str) -> str:
         try:
-            _run_sync(self._client.add_episode(
+            self._run(self._client.add_episode(
                 name="user_correction",
                 episode_body=(
                     f"Correction: the fact '{relationship}' for '{entity}' was incorrect. "
@@ -494,7 +526,7 @@ class GraphitiMemoryProvider(_MemoryBase):
 
     def _mirror_memory_write(self, action: str, target: str, content: str) -> None:
         try:
-            _run_sync(self._client.add_episode(
+            self._run(self._client.add_episode(
                 name="memory_tool_write",
                 episode_body=f"Memory tool {action} on {target}: {content}",
                 source_description="memory_tool",
