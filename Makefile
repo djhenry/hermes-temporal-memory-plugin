@@ -15,7 +15,7 @@ install-hermes: $(HERMES_DIR)/.git
 	$(PIP) install -e $(HERMES_DIR) --no-deps -q
 
 install: install-hermes
-	$(PIP) install -e ".[sqlite,dev]" -q
+	$(PIP) install -e ".[dev]" -q
 
 # ── Environment ────────────────────────────────────────────────────────────
 
@@ -38,7 +38,7 @@ test-unit:
 test-integration:
 	$(PYTEST) tests/integration/ -v -m "not live"
 
-# Live integration tests — requires graphiti-core[sqlite] + extraction LLM key
+# Live integration tests — requires graphiti-core[falkordblite] + extraction LLM key
 test-live:
 	$(PYTEST) tests/integration/ -v -m "live"
 

@@ -100,12 +100,13 @@ def _check_neo4j_connectivity(uri: str) -> None:
 def _print_entity_counts(group_id: str, backend: str, use_kuzu: bool) -> None:
     try:
         client = _make_client(backend, use_kuzu)
-        nodes = asyncio.run(
-            client.nodes.entity.get_by_group_ids(group_ids=[group_id], limit=1000)
-        )
-        edges = asyncio.run(
-            client.edges.entity.get_by_group_ids(group_ids=[group_id], limit=1000)
-        )
+
+        async def _fetch():
+            nodes = await client.nodes.entity.get_by_group_ids(group_ids=[group_id], limit=1000)
+            edges = await client.edges.entity.get_by_group_ids(group_ids=[group_id], limit=1000)
+            return nodes, edges
+
+        nodes, edges = asyncio.run(_fetch())
         print(f"  entities : {len(nodes or [])}")
         print(f"  facts    : {len(edges or [])}")
     except Exception as exc:
@@ -125,7 +126,13 @@ def _cmd_clear(args) -> None:
             return
 
     use_kuzu = bool(os.environ.get("GRAPHITI_USE_KUZU"))
-    backend = "kuzu" if use_kuzu else os.environ.get("GRAPHITI_BACKEND", "neo4j")
+    use_falkordblite = bool(os.environ.get("GRAPHITI_USE_FALKORDB_LITE"))
+    if use_kuzu:
+        backend = "kuzu"
+    elif use_falkordblite:
+        backend = "falkordblite"
+    else:
+        backend = os.environ.get("GRAPHITI_BACKEND", "neo4j")
 
     try:
         client = _make_client(backend, use_kuzu)
@@ -151,7 +158,13 @@ def _cmd_export(args) -> None:
     group_id = f"hermes-{profile}"
     output = args.output
     use_kuzu = bool(os.environ.get("GRAPHITI_USE_KUZU"))
-    backend = "kuzu" if use_kuzu else os.environ.get("GRAPHITI_BACKEND", "neo4j")
+    use_falkordblite = bool(os.environ.get("GRAPHITI_USE_FALKORDB_LITE"))
+    if use_kuzu:
+        backend = "kuzu"
+    elif use_falkordblite:
+        backend = "falkordblite"
+    else:
+        backend = os.environ.get("GRAPHITI_BACKEND", "neo4j")
 
     try:
         client = _make_client(backend, use_kuzu)

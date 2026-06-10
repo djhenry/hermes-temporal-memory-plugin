@@ -20,9 +20,10 @@ class GraphitiConfig(BaseModel):
     backend: Literal["neo4j", "kuzu", "falkordblite"] = "neo4j"
     recall_mode: Literal["hybrid", "context", "tools"] = "hybrid"
 
-    # Original plan: power-user escape hatch only (index-bridge approach is the default)
+    # Handled at the Hermes host level, not by the plugin. Setting this has no effect.
     disable_builtin_memory_tool: bool = False
 
+    # Planned: cap concurrent Graphiti extraction calls. Not yet implemented.
     semaphore_limit: int = Field(default=5, ge=1, le=50)
     max_recall_tokens: int = Field(default=600, ge=100, le=2000)
 
