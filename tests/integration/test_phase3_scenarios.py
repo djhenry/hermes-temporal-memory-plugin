@@ -20,11 +20,10 @@ import logging
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from plugins.memory.graphiti import GraphitiMemoryProvider
 from plugins.memory.graphiti.memory_index import FENCE_START
 
 
@@ -52,37 +51,7 @@ def _episode_result(nodes=None, edges=None):
     return r
 
 
-@pytest.fixture
-def hermes_home(tmp_path):
-    (tmp_path / "memories").mkdir()
-    return tmp_path
-
-
-@pytest.fixture
-def mock_client():
-    c = MagicMock()
-    c.search = AsyncMock(return_value=[])
-    c.add_episode = AsyncMock(return_value=_episode_result())
-    c.nodes = MagicMock()
-    c.nodes.entity = MagicMock()
-    c.nodes.entity.get_by_group_ids = AsyncMock(return_value=[])
-    c.edges = MagicMock()
-    c.edges.entity = MagicMock()
-    c.edges.entity.get_by_group_ids = AsyncMock(return_value=[])
-    c.build_communities = AsyncMock(return_value=([], []))
-    c.build_indices_and_constraints = AsyncMock()
-    c.close = AsyncMock()
-    return c
-
-
-@pytest.fixture
-def provider(mock_client, hermes_home, monkeypatch):
-    monkeypatch.setenv("GRAPHITI_USE_KUZU", "1")
-    with patch.object(GraphitiMemoryProvider, "_build_client", return_value=mock_client):
-        p = GraphitiMemoryProvider()
-        p.initialize("sess-phase3", identity="testuser", hermes_home=str(hermes_home))
-    time.sleep(0.05)
-    return p
+# Fixtures (hermes_home, mock_client, provider) are shared — see conftest.py.
 
 
 # ── Supersession scenarios ────────────────────────────────────────────────────
@@ -184,13 +153,11 @@ class TestEntityDisambiguation:
             "Marta Ruiz introduced me to the running club.",
             "Got it, Marta Ruiz is your running club contact.",
         )
+        # _ingest_turn runs synchronously, so the index write has completed.
         memory_md = hermes_home / "memories" / "MEMORY.md"
-        # Give the daemon threads a moment
-        time.sleep(0.1)
-        if memory_md.exists():
-            content = memory_md.read_text()
-            # At least one Marta must be in the index after ingestion
-            assert "Marta" in content
+        content = memory_md.read_text()
+        assert "Marta Kovač" in content
+        assert "Marta Ruiz" in content
 
     def test_disambiguation_preserved_in_graph_browse(self, provider, mock_client):
         """graph_browse for each Marta returns distinct facts."""
