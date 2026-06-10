@@ -143,8 +143,9 @@ def _cmd_clear(args) -> None:
 
 
 async def _delete_group(client, group_id: str) -> None:
-    # Use the graph driver's execute_query to delete all nodes for this group.
-    # This works for both Neo4j and Kuzu.
+    # execute_query is part of graphiti-core's GraphDriver interface.
+    # Neo4j, Kuzu, and FalkorDB Lite all implement it with Cypher syntax.
+    # FalkorDB Lite uses Redis-protocol Cypher — same query syntax applies.
     await client.driver.execute_query(
         "MATCH (n {group_id: $group_id}) DETACH DELETE n",
         group_id=group_id,

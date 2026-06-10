@@ -165,8 +165,16 @@ class GraphitiMemoryProvider(_MemoryBase):
     def _run(self, coro: Any) -> Any:
         """Run a coroutine on the provider's persistent event loop."""
         import asyncio
-        if self._async_loop and self._async_loop.is_running():
-            return asyncio.run_coroutine_threadsafe(coro, self._async_loop).result()
+        loop = self._async_loop
+        if loop and loop.is_running():
+            return asyncio.run_coroutine_threadsafe(coro, loop).result()
+        if self._client is not None:
+            # Loop is gone but client still exists: provider is shutting down or
+            # has already shut down. Creating a new throwaway loop here would
+            # break FalkorDB Lite's loop-bound connections. Close the coroutine
+            # to prevent ResourceWarning and raise so callers can log/skip.
+            coro.close()
+            raise RuntimeError("graphiti async loop is not running (shutting down?)")
         return _run_sync(coro)
 
     # ------------------------------------------------------------------
@@ -373,7 +381,14 @@ class GraphitiMemoryProvider(_MemoryBase):
                 num_results=num_results,
             ))
         except Exception as exc:
-            if "connection" not in str(exc).lower():
+            err = str(exc).lower()
+            # Only fall back to BM25 for connectivity / service-availability errors
+            # (e.g. OpenRouter not exposing /embeddings). Re-raise auth errors,
+            # schema errors, and programming bugs so they're not masked.
+            if not any(w in err for w in (
+                "connection", "unreachable", "unavailable", "timeout", "refused",
+                "404", "not found", "not supported",
+            )):
                 raise
         # Embeddings endpoint unreachable — retry with BM25-only search config.
         try:
@@ -546,15 +561,23 @@ class GraphitiMemoryProvider(_MemoryBase):
     def _seed_index_from_graph(self) -> None:
         if not self._index or not self._client:
             return
+        _NODE_LIMIT = 500
+        _EDGE_LIMIT = 1000
         try:
             nodes = self._run(self._client.nodes.entity.get_by_group_ids(
                 group_ids=[self._group_id],
-                limit=200,
+                limit=_NODE_LIMIT,
             ))
             edges = self._run(self._client.edges.entity.get_by_group_ids(
                 group_ids=[self._group_id],
-                limit=500,
+                limit=_EDGE_LIMIT,
             ))
+            if nodes and len(nodes) >= _NODE_LIMIT:
+                log.warning(
+                    "graphiti index seed: fetched %d nodes (limit). Some entities may be "
+                    "missing '· history available' hints. Increase limit or run full refresh.",
+                    _NODE_LIMIT,
+                )
             self._index.seed_from_graph(nodes or [], edges or [])
         except Exception as exc:
             log.warning("graphiti index seed failed: %s", exc)
