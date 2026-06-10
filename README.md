@@ -92,11 +92,11 @@ hermes plugins enable graphiti
 
 ```bash
 pip install hermes-graphiti[falkordblite]
-export GRAPHITI_BACKEND=falkordblite
+export GRAPHITI_USE_FALKORDB_LITE=1
 hermes plugins enable graphiti
 ```
 
-Both store the graph at `~/.hermes/graphiti.kuzu` / `~/.hermes/graphiti.falkor` with no external services.
+Both store the graph at `~/.hermes/graphiti.kuzu` / `~/.hermes/graphiti.fdb` with no external services.
 
 ---
 

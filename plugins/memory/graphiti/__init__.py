@@ -577,7 +577,7 @@ class GraphitiMemoryProvider(_MemoryBase):
     def _build_client(self) -> Any:
         from graphiti_core import Graphiti  # type: ignore[import]
 
-        llm_client = _build_llm_client()
+        llm_client = _build_llm_client(self._cfg.extraction)
         backend = self._cfg.backend
         use_kuzu = os.environ.get("GRAPHITI_USE_KUZU") or backend == "kuzu"
         use_falkordblite = os.environ.get("GRAPHITI_USE_FALKORDB_LITE") or backend == "falkordblite"
@@ -812,14 +812,23 @@ def _create_kuzu_fts_indices(kuzu_driver: Any) -> None:
         log.warning("Could not create Kuzu FTS indices: %s", exc)
 
 
-def _build_llm_client() -> Any | None:
-    """Build a Graphiti LLMClient from env vars, if GRAPHITI_LLM_MODEL is set.
+def _build_llm_client(extraction: Any = None) -> Any | None:
+    """Build a Graphiti LLMClient from config or env vars.
 
-    Supports any OpenAI-compatible endpoint via OPENAI_BASE_URL — including
-    OpenRouter (https://openrouter.ai/api/v1) for free or cheap models in CI.
-    Returns None to let Graphiti use its default (reads OPENAI_API_KEY itself).
+    Config values (extraction.model, extraction.base_url) take precedence over
+    the equivalent env vars (GRAPHITI_LLM_MODEL, OPENAI_BASE_URL).
+    Supports any OpenAI-compatible endpoint — including OpenRouter for free/cheap
+    models in CI. Returns None to let Graphiti use its default.
+
+    Note: extraction.provider is not yet wired; only the OpenAI-compatible client
+    is built regardless of provider value. Set extraction.provider=inherit to rely
+    on Graphiti's default client (reads OPENAI_API_KEY itself).
     """
-    model = os.environ.get("GRAPHITI_LLM_MODEL") or os.environ.get("GRAPHITI_EXTRACTION_MODEL")
+    model = (
+        (extraction and getattr(extraction, "model", None))
+        or os.environ.get("GRAPHITI_LLM_MODEL")
+        or os.environ.get("GRAPHITI_EXTRACTION_MODEL")
+    )
     if not model:
         return None
 
@@ -828,7 +837,10 @@ def _build_llm_client() -> Any | None:
         from graphiti_core.llm_client.config import LLMConfig  # type: ignore[import]
 
         cfg = LLMConfig(model=model)
-        base_url = os.environ.get("OPENAI_BASE_URL")
+        base_url = (
+            (extraction and getattr(extraction, "base_url", None))
+            or os.environ.get("OPENAI_BASE_URL")
+        )
         if base_url:
             cfg.base_url = base_url
         return OpenAIClient(cfg)
