@@ -40,8 +40,9 @@ MAX_INDEX_CHARS = MAX_INDEX_TOKENS * 4
 class MemoryIndexManager:
     """Maintains the recall-trigger index section in MEMORY.md."""
 
-    def __init__(self, memory_dir: Path) -> None:
+    def __init__(self, memory_dir: Path, max_tokens: int = MAX_INDEX_TOKENS) -> None:
         self._memory_md = memory_dir / "MEMORY.md"
+        self._max_chars = max_tokens * 4
         # _lock guards all mutable state below AND the file write, so every
         # caller does a single acquire covering read → mutate → render → write.
         self._lock = threading.Lock()
@@ -170,7 +171,7 @@ class MemoryIndexManager:
         body = self._render_body(now_str)
 
         # Enforce token cap: drop least-recently-seen entities one at a time.
-        while len(body) > MAX_INDEX_CHARS and self._entities:
+        while len(body) > self._max_chars and self._entities:
             oldest_label = oldest_name = None
             oldest_dt = datetime.max.replace(tzinfo=timezone.utc)
             for label, ents in self._entities.items():

@@ -47,19 +47,30 @@ def _cmd_status(args) -> None:
     profile = os.environ.get("HERMES_PROFILE", "default")
     group_id = f"hermes-{profile}"
     use_kuzu = bool(os.environ.get("GRAPHITI_USE_KUZU"))
-    backend = "kuzu" if use_kuzu else os.environ.get("GRAPHITI_BACKEND", "neo4j")
+    use_falkordblite = bool(os.environ.get("GRAPHITI_USE_FALKORDB_LITE"))
+    if use_kuzu:
+        backend = "kuzu"
+    elif use_falkordblite:
+        backend = "falkordblite"
+    else:
+        backend = os.environ.get("GRAPHITI_BACKEND", "neo4j")
 
     print("Graphiti memory plugin")
     print(f"  backend  : {backend}")
     print(f"  group_id : {group_id}")
 
-    if backend == "kuzu" or use_kuzu:
+    if use_kuzu or backend == "kuzu":
         db_path = os.environ.get(
             "GRAPHITI_KUZU_PATH", str(Path.home() / ".hermes" / "graphiti.kuzu")
         )
         print(f"  db       : {db_path}")
-        exists = Path(db_path).exists()
-        print(f"  db found : {'yes' if exists else 'no (not yet initialised)'}")
+        print(f"  db found : {'yes' if Path(db_path).exists() else 'no (not yet initialised)'}")
+    elif use_falkordblite or backend == "falkordblite":
+        db_path = os.environ.get(
+            "GRAPHITI_FALKORDBLITE_PATH", str(Path.home() / ".hermes" / "graphiti.fdb")
+        )
+        print(f"  db       : {db_path}")
+        print(f"  db found : {'yes' if Path(db_path).exists() else 'no (not yet initialised)'}")
     else:
         uri = os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687")
         print(f"  uri      : {uri}")
@@ -266,6 +277,23 @@ def _make_client(backend: str, use_kuzu: bool):
             "GRAPHITI_KUZU_PATH", str(Path.home() / ".hermes" / "graphiti.kuzu")
         )
         return Graphiti(graph_driver=KuzuDriver(db=db_path))
+
+    use_falkordblite = bool(os.environ.get("GRAPHITI_USE_FALKORDB_LITE") or backend == "falkordblite")
+    if use_falkordblite:
+        from graphiti_core.driver.falkordb_driver import FalkorDriver  # type: ignore[import]
+        try:
+            from redislite.async_falkordb_client import AsyncFalkorDB  # type: ignore[import]
+        except ImportError as exc:
+            raise RuntimeError(
+                "FalkorDB Lite requires Python 3.12+ and graphiti-core[falkordblite]. "
+                "Run: pip install 'graphiti-core[falkordblite]'"
+            ) from exc
+        db_path = os.environ.get(
+            "GRAPHITI_FALKORDBLITE_PATH",
+            str(Path.home() / ".hermes" / "graphiti.fdb"),
+        )
+        falkor_client = AsyncFalkorDB(dbfilename=db_path)
+        return Graphiti(graph_driver=FalkorDriver(falkor_db=falkor_client))
 
     return Graphiti(
         uri=os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687"),
