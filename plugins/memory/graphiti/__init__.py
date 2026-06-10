@@ -165,7 +165,6 @@ class GraphitiMemoryProvider(_MemoryBase):
     def _run(self, coro: Any) -> Any:
         """Run a coroutine on the provider's persistent event loop."""
         import asyncio
-        import concurrent.futures
         if self._async_loop and self._async_loop.is_running():
             return asyncio.run_coroutine_threadsafe(coro, self._async_loop).result()
         return _run_sync(coro)
@@ -235,8 +234,16 @@ class GraphitiMemoryProvider(_MemoryBase):
                 self._run(self._client.close())
             except Exception:
                 pass
-        if self._async_loop and self._async_loop.is_running():
-            self._async_loop.call_soon_threadsafe(self._async_loop.stop)
+        # Detach the loop BEFORE stopping it: a concurrent or repeated
+        # shutdown could otherwise submit close() to a loop that stops
+        # before running it, blocking forever on the un-resolved future.
+        loop, thread = self._async_loop, self._async_thread
+        self._async_loop = None
+        self._async_thread = None
+        if loop and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+        if thread and thread.is_alive():
+            thread.join(timeout=5)
 
     # ------------------------------------------------------------------
     # System prompt
@@ -360,7 +367,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         """Run hybrid search; fall back to BM25-only when the embeddings
         endpoint is unavailable (e.g. OpenRouter proxy doesn't expose /embeddings)."""
         try:
-            return _run_sync(self._client.search(
+            return self._run(self._client.search(
                 query=query,
                 group_ids=[self._group_id],
                 num_results=num_results,
@@ -378,7 +385,7 @@ class GraphitiMemoryProvider(_MemoryBase):
                 reranker=EdgeReranker.rrf,
             ))
             bm25_cfg.limit = num_results
-            result = _run_sync(self._client.search_(
+            result = self._run(self._client.search_(
                 query=query,
                 group_ids=[self._group_id],
                 config=bm25_cfg,
@@ -499,7 +506,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         episode_body = f"User: {clean_user}\nAssistant: {clean_assistant}"
 
         try:
-            result = _run_sync(self._client.add_episode(
+            result = self._run(self._client.add_episode(
                 name="conversation_turn",
                 episode_body=episode_body,
                 source_description="hermes_conversation",
@@ -540,11 +547,11 @@ class GraphitiMemoryProvider(_MemoryBase):
         if not self._index or not self._client:
             return
         try:
-            nodes = _run_sync(self._client.nodes.entity.get_by_group_ids(
+            nodes = self._run(self._client.nodes.entity.get_by_group_ids(
                 group_ids=[self._group_id],
                 limit=200,
             ))
-            edges = _run_sync(self._client.edges.entity.get_by_group_ids(
+            edges = self._run(self._client.edges.entity.get_by_group_ids(
                 group_ids=[self._group_id],
                 limit=500,
             ))
@@ -556,7 +563,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         if not self._index or not self._client:
             return
         try:
-            communities, _ = _run_sync(self._client.build_communities(
+            communities, _ = self._run(self._client.build_communities(
                 group_ids=[self._group_id]
             ))
             self._index.full_refresh(communities or [])

@@ -46,38 +46,7 @@ def _episode_result(nodes=None, edges=None):
     return r
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
-
-@pytest.fixture
-def hermes_home(tmp_path):
-    (tmp_path / "memories").mkdir()
-    return tmp_path
-
-
-@pytest.fixture
-def mock_client():
-    c = MagicMock()
-    c.search = AsyncMock(return_value=[])
-    c.add_episode = AsyncMock(return_value=_episode_result())
-    c.nodes = MagicMock()
-    c.nodes.entity = MagicMock()
-    c.nodes.entity.get_by_group_ids = AsyncMock(return_value=[])
-    c.edges = MagicMock()
-    c.edges.entity = MagicMock()
-    c.edges.entity.get_by_group_ids = AsyncMock(return_value=[])
-    c.build_communities = AsyncMock(return_value=([], []))
-    c.close = AsyncMock()
-    return c
-
-
-@pytest.fixture
-def provider(mock_client, hermes_home, monkeypatch):
-    monkeypatch.setenv("GRAPHITI_USE_FALKORDB_LITE", "1")
-    with patch.object(GraphitiMemoryProvider, "_build_client", return_value=mock_client):
-        p = GraphitiMemoryProvider()
-        p.initialize("sess-001", identity="testuser", hermes_home=str(hermes_home))
-    time.sleep(0.05)  # let seed thread settle
-    return p
+# Fixtures (hermes_home, mock_client, provider) are shared — see conftest.py.
 
 
 # ── Tests: initialization ─────────────────────────────────────────────────────
@@ -282,6 +251,99 @@ class TestTools:
     def test_handle_tool_call_unknown_returns_error(self, provider):
         result = provider.handle_tool_call("no_such_tool", {})
         assert "Unknown tool" in result
+
+
+# ── Tests: persistent event loop (FalkorDB Lite regression) ──────────────────
+
+class TestPersistentEventLoop:
+    """FalkorDB Lite binds its Redis connections to the first event loop they
+    run on. Every client coroutine must therefore execute on the provider's
+    single persistent loop — one stray asyncio.run() breaks the live backend
+    with "Event loop is closed" / "attached to a different loop"."""
+
+    @staticmethod
+    def _recording_client():
+        import asyncio
+
+        loops: list = []
+
+        def returns(value):
+            async def fn(*args, **kwargs):
+                loops.append(asyncio.get_running_loop())
+                return value
+            return fn
+
+        c = MagicMock()
+        c.search = returns([])
+        c.search_ = returns(MagicMock(edges=[]))
+        c.add_episode = returns(_episode_result())
+        c.nodes.entity.get_by_group_ids = returns([])
+        c.edges.entity.get_by_group_ids = returns([])
+        c.build_communities = returns(([], []))
+        c.build_indices_and_constraints = returns(None)
+        c.close = returns(None)
+        return c, loops
+
+    def test_every_client_call_runs_on_the_one_persistent_loop(self, hermes_home, monkeypatch):
+        monkeypatch.setenv("GRAPHITI_USE_FALKORDB_LITE", "1")
+        client, loops = self._recording_client()
+        with patch.object(GraphitiMemoryProvider, "_build_client", return_value=client):
+            p = GraphitiMemoryProvider()
+            p.initialize("loop-test", identity="tester", hermes_home=str(hermes_home))
+        time.sleep(0.1)  # background index seed
+
+        # Exercise every code path that awaits on the client.
+        p._seed_index_from_graph()
+        p.prefetch("anything")
+        p._temporal_search("anything")
+        p._fact_history("user")
+        p._graph_browse("user")
+        p._ingest_turn("Hello", "Hi")
+        p._mirror_memory_write("add", "memory", "fact")
+        p._fact_correct("user", "LIVES_IN", "Madrid")
+        p._full_index_refresh()
+        persistent_loop = p._async_loop  # shutdown() detaches it
+        p.shutdown()
+
+        assert loops, "no client coroutine ever executed"
+        assert set(loops) == {persistent_loop}, (
+            "client coroutines ran on more than one event loop — "
+            "this breaks FalkorDB Lite's loop-bound connections"
+        )
+
+
+# ── Tests: shutdown ───────────────────────────────────────────────────────────
+
+class TestShutdown:
+    def test_closes_client(self, provider, mock_client):
+        provider.shutdown()
+        mock_client.close.assert_awaited()
+
+    def test_stops_persistent_loop(self, provider):
+        loop = provider._async_loop
+        provider.shutdown()  # joins the loop thread before returning
+        assert not loop.is_running()
+
+    def test_is_idempotent(self, provider):
+        provider.shutdown()
+        provider.shutdown()  # second call must not raise
+
+
+# ── Tests: on_session_end ─────────────────────────────────────────────────────
+
+class TestOnSessionEnd:
+    def test_triggers_community_refresh(self, provider, mock_client):
+        provider.on_session_end()
+        deadline = time.monotonic() + 2
+        while not mock_client.build_communities.await_count and time.monotonic() < deadline:
+            time.sleep(0.01)
+        mock_client.build_communities.assert_awaited()
+
+    def test_noop_when_index_disabled(self, provider, mock_client):
+        provider._index = None
+        provider.on_session_end()
+        time.sleep(0.1)
+        mock_client.build_communities.assert_not_awaited()
 
 
 # ── Live tests ────────────────────────────────────────────────────────────────
