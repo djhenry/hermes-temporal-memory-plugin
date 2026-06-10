@@ -323,8 +323,7 @@ class TestLiveGraphiti:
         # Verify the LLM actually extracted relationship edges.
         # _ingest_turn swallows exceptions silently; querying via the public
         # Graphiti API tells us whether add_episode produced any data to search over.
-        from plugins.memory.graphiti import _run_sync
-        edges_in_graph = _run_sync(p._client.edges.entity.get_by_group_ids(
+        edges_in_graph = p._run(p._client.edges.entity.get_by_group_ids(
             group_ids=[p._group_id],
             limit=20,
         )) or []
