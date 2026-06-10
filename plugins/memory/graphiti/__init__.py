@@ -83,7 +83,7 @@ GRAPH_BROWSE_SCHEMA = {
             "entity": {"type": "string", "description": "Entity name to look up"},
             "depth": {
                 "type": "integer",
-                "description": "How many hops to traverse (1–3, default 1)",
+                "description": "Search depth hint (1=immediate facts, 2–3=broader context). Uses semantic search rather than strict BFS traversal.",
                 "minimum": 1,
                 "maximum": 3,
                 "default": 1,
@@ -216,7 +216,7 @@ class GraphitiMemoryProvider(_MemoryBase):
                 kwargs.get("hermes_home") or os.environ.get("HERMES_HOME", Path.home() / ".hermes")
             )
             memory_dir = hermes_home / "memories"
-            self._index = MemoryIndexManager(memory_dir)
+            self._index = MemoryIndexManager(memory_dir, max_tokens=self._cfg.max_index_tokens)
 
             # Seed index from existing graph entities in a background thread
             # so initialize() itself never blocks on a network call.
@@ -665,7 +665,11 @@ class GraphitiMemoryProvider(_MemoryBase):
             lines.append(f"GRAPHITI_KUZU_PATH={db_path}")
             backend_name = "kuzu"
         elif choice == "3":
-            lines.append("GRAPHITI_BACKEND=falkordblite")
+            lines.append("GRAPHITI_USE_FALKORDB_LITE=1")
+            db_path = input(
+                f"FalkorDB path [default: {home / 'graphiti.fdb'}]: "
+            ).strip() or str(home / "graphiti.fdb")
+            lines.append(f"GRAPHITI_FALKORDBLITE_PATH={db_path}")
             backend_name = "falkordblite"
         else:
             uri = input("Neo4j URI [default: bolt://localhost:7687]: ").strip() or "bolt://localhost:7687"

@@ -401,7 +401,7 @@ class TestLiveGraphiti:
 
         result = p.prefetch("where do I live")
         assert result is not None, (
-            f"prefetch returned None despite {len(rows)} edges in graph"
+            f"prefetch returned None despite {len(edges_in_graph)} edges in graph"
         )
         assert "Madrid" in result
 
