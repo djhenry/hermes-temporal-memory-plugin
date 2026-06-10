@@ -53,6 +53,9 @@ benchmark:
 benchmark-verbose:
 	$(PYTHON) benchmarks/benchmark.py --verbose
 
+benchmark-advanced:
+	$(PYTHON) benchmarks/advanced_benchmark.py
+
 # ── Quality ────────────────────────────────────────────────────────────────
 
 lint:

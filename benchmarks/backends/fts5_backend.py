@@ -56,16 +56,18 @@ class FTS5Backend:
             CREATE VIRTUAL TABLE facts
             USING fts5(
                 content,
-                entity    UNINDEXED,
-                relation  UNINDEXED,
-                valid_at  UNINDEXED,
-                tokenize  = 'unicode61'
+                entity      UNINDEXED,
+                relation    UNINDEXED,
+                valid_at    UNINDEXED,
+                invalid_at  UNINDEXED,
+                tokenize    = 'unicode61'
             )
         """)
         self._db.commit()
 
         self._ingest_times: list[float] = []
         self._query_times: list[float] = []
+        self._last_meta: list[tuple[str, str, str]] = []
 
     # ── Ingestion ──────────────────────────────────────────────────────────────
 
@@ -80,8 +82,8 @@ class FTS5Backend:
         """Append-only insert — old facts are NEVER removed (MEMORY.md behaviour)."""
         t0 = time.perf_counter()
         self._db.execute(
-            "INSERT INTO facts(content, entity, relation, valid_at) VALUES (?, ?, ?, ?)",
-            (fact, entity, relationship, valid_at),
+            "INSERT INTO facts(content, entity, relation, valid_at, invalid_at) VALUES (?, ?, ?, ?, ?)",
+            (fact, entity, relationship, valid_at, invalid_at or ""),
         )
         self._db.commit()
         self._ingest_times.append(time.perf_counter() - t0)
@@ -94,25 +96,45 @@ class FTS5Backend:
         as_of: Optional[str] = None,   # deliberately IGNORED — FTS5 has no temporal concept
         k: int = 5,
     ) -> list[str]:
-        """FTS5 BM25 search.  `as_of` is ignored — no temporal filtering exists."""
+        """FTS5 BM25 search.  `as_of` is ignored — no temporal filtering exists.
+
+        Tie-breaking uses rowid DESC (most-recently inserted fact wins) which
+        matches the optimistic assumption that newer memories are added later.
+        This is the BEST CASE for FTS5 on current-state queries, and the
+        WORST CASE for temporal queries (always returns newest, never historical).
+        """
         t0 = time.perf_counter()
         fts_query = _to_fts5_query(query)
         results: list[str] = []
         if fts_query:
             try:
                 rows = self._db.execute(
-                    f"SELECT content FROM facts WHERE facts MATCH ? ORDER BY bm25(facts) LIMIT {k}",
+                    f"SELECT content, valid_at, invalid_at FROM facts "
+                    f"WHERE facts MATCH ? ORDER BY bm25(facts), rowid DESC LIMIT {k}",
                     (fts_query,),
                 ).fetchall()
                 results = [r[0] for r in rows]
+                self._last_meta = [(r[0], r[1], r[2]) for r in rows]
             except sqlite3.OperationalError:
-                # Fallback: return most-recently inserted rows
                 rows = self._db.execute(
-                    f"SELECT content FROM facts ORDER BY rowid DESC LIMIT {k}"
+                    f"SELECT content, valid_at, invalid_at FROM facts ORDER BY rowid DESC LIMIT {k}"
                 ).fetchall()
                 results = [r[0] for r in rows]
+                self._last_meta = [(r[0], r[1], r[2]) for r in rows]
+        else:
+            self._last_meta = []
         self._query_times.append(time.perf_counter() - t0)
         return results
+
+    def search_with_meta(
+        self,
+        query: str,
+        as_of: Optional[str] = None,
+        k: int = 5,
+    ) -> list[tuple[str, str, str]]:
+        """Search and return (content, valid_at, invalid_at) triples."""
+        self.search(query, as_of=as_of, k=k)
+        return getattr(self, "_last_meta", [])
 
     # ── Metrics ────────────────────────────────────────────────────────────────
 
