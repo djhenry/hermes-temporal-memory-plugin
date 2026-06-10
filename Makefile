@@ -1,4 +1,4 @@
-.PHONY: install install-hermes test test-unit test-integration test-live test-all lint clean
+.PHONY: install install-hermes test test-unit test-integration test-live test-all benchmark lint clean
 
 HERMES_DIR  := vendor/hermes-agent
 HERMES_REPO := https://github.com/NousResearch/hermes-agent.git
@@ -43,6 +43,15 @@ test-live:
 	$(PYTEST) tests/integration/ -v -m "live"
 
 test: test-unit test-integration
+
+# ── Benchmark ──────────────────────────────────────────────────────────────
+
+# Compare retrieval recall: hermes-graphiti vs Hermes built-in FTS5 baseline
+benchmark:
+	$(PYTHON) benchmarks/benchmark.py
+
+benchmark-verbose:
+	$(PYTHON) benchmarks/benchmark.py --verbose
 
 # ── Quality ────────────────────────────────────────────────────────────────
 
