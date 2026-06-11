@@ -1,5 +1,12 @@
 # hermes-graphiti
 
+> [!WARNING]
+> **Work in Progress — Not Functional**
+>
+> This plugin is under active development and is **not yet usable**. Core functionality is incomplete, APIs may change without notice, and the installation/quickstart instructions below do not work end-to-end. Do not use this in any project expecting working memory integration.
+>
+> Follow the repo for updates as development progresses.
+
 Temporal knowledge-graph memory provider for [Hermes Agent](https://github.com/NousResearch/hermes-agent), powered by [Graphiti](https://github.com/getzep/graphiti) (Zep).
 
 Stores entities, relationships, and bi-temporal validity windows. Every fact carries the date range during which it was true — so when you move cities or change jobs, the old fact is archived, not overwritten.
