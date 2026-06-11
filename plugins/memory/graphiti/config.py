@@ -13,6 +13,14 @@ class ExtractionConfig(BaseModel):
     base_url: str | None = None  # used for ollama
 
 
+class EmbedderConfig(BaseModel):
+    """Embedding model config. Falls back to OPENAI_API_KEY + default OpenAI
+    endpoint if not set. Set base_url to use a local provider (Ollama, LM Studio)."""
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+
+
 class GraphitiConfig(BaseModel):
     # neo4j: Docker/cloud, recommended for production and multi-user deployments.
     # kuzu: embedded, no Docker, single-user (deprecated upstream — use for dev/offline only).
@@ -32,3 +40,4 @@ class GraphitiConfig(BaseModel):
     max_index_tokens: int = Field(default=200, ge=50, le=500)
 
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
+    embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)

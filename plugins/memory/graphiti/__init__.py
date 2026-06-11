@@ -195,9 +195,32 @@ class GraphitiMemoryProvider(_MemoryBase):
     # ------------------------------------------------------------------
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
+        log.info("graphiti: initialize() called for session %s", session_id)
         cfg_dict = kwargs.get("config", {})
+        if not cfg_dict:
+            # Hermes doesn't pass plugins.<name> config to initialize().
+            # Read it from config.yaml directly.
+            try:
+                from hermes_cli.config import load_config, cfg_get
+                full_cfg = load_config()
+                cfg_dict = cfg_get(full_cfg, "plugins", "graphiti") or {}
+            except Exception:
+                cfg_dict = {}
         if isinstance(cfg_dict, dict):
             self._cfg = GraphitiConfig(**cfg_dict)
+
+        # Ensure OPENAI_API_KEY is in os.environ for Graphiti's embedder.
+        # Hermes reads ~/.hermes/.env via load_env() but doesn't always
+        # propagate values to os.environ. Graphiti's default OpenAI embedder
+        # reads os.environ directly.
+        if not os.environ.get("OPENAI_API_KEY"):
+            try:
+                from hermes_cli.config import load_env
+                _key = load_env().get("OPENAI_API_KEY")
+                if _key:
+                    os.environ["OPENAI_API_KEY"] = _key
+            except Exception:
+                pass
 
         # Namespace: hermes-<profile>[-<platform_user_id>]
         identity = kwargs.get("identity") or os.environ.get("HERMES_PROFILE", "default")
@@ -206,7 +229,11 @@ class GraphitiMemoryProvider(_MemoryBase):
         self._group_id = f"hermes-{identity}{user_suffix}"
 
         self._start_async_loop()
-        self._client = self._build_client()
+        try:
+            self._client = self._build_client()
+        except Exception as exc:
+            log.error("graphiti: _build_client() failed: %s", exc, exc_info=True)
+            raise
 
         # KuzuDriver never sets _database (graphiti-core bug); patch it here so
         # graphiti.py's `group_id != driver._database` check doesn't throw.
@@ -298,7 +325,7 @@ class GraphitiMemoryProvider(_MemoryBase):
     # Turn ingestion
     # ------------------------------------------------------------------
 
-    def sync_turn(self, user_content: str, assistant_content: str, messages: Any = None) -> None:
+    def sync_turn(self, user_content: str, assistant_content: str, messages: Any = None, session_id: str = "") -> None:
         # Join previous sync thread with short timeout before starting the next
         with self._sync_lock:
             if self._sync_thread and self._sync_thread.is_alive():
@@ -601,9 +628,17 @@ class GraphitiMemoryProvider(_MemoryBase):
         from graphiti_core import Graphiti  # type: ignore[import]
 
         llm_client = _build_llm_client(self._cfg.extraction)
+        embedder = _build_embedder(self._cfg.embedder)
         backend = self._cfg.backend
         use_kuzu = os.environ.get("GRAPHITI_USE_KUZU") or backend == "kuzu"
         use_falkordblite = os.environ.get("GRAPHITI_USE_FALKORDB_LITE") or backend == "falkordblite"
+
+        # Common kwargs for all backends
+        common_kwargs: dict[str, Any] = {}
+        if llm_client:
+            common_kwargs["llm_client"] = llm_client
+        if embedder:
+            common_kwargs["embedder"] = embedder
 
         if use_kuzu:
             import warnings
@@ -621,19 +656,28 @@ class GraphitiMemoryProvider(_MemoryBase):
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             kuzu_driver = KuzuDriver(db=db_path)
             _create_kuzu_fts_indices(kuzu_driver)
-            kwargs = {"graph_driver": kuzu_driver}
-            if llm_client:
-                kwargs["llm_client"] = llm_client
-            return Graphiti(**kwargs)
+            common_kwargs["graph_driver"] = kuzu_driver
+            return Graphiti(**common_kwargs)
 
         if use_falkordblite:
             # Requires Python 3.12+ and pip install graphiti-core[falkordblite]
+            import sys
+            if sys.version_info < (3, 12):
+                raise RuntimeError(
+                    f"FalkorDB Lite requires Python 3.12+, but the gateway is running "
+                    f"Python {sys.version_info.major}.{sys.version_info.minor}. "
+                    f"Recreate the gateway venv with Python 3.12+:\n"
+                    f"  cd ~/.hermes/hermes-agent && uv venv --python python3.12\n"
+                    f"  source .venv/bin/activate\n"
+                    f"  pip install -e '.[all]' 'graphiti-core[falkordblite]'\n"
+                    f"  hermes gateway restart"
+                )
             from graphiti_core.driver.falkordb_driver import FalkorDriver  # type: ignore[import]
             try:
                 from redislite.async_falkordb_client import AsyncFalkorDB  # type: ignore[import]
             except ImportError as exc:
                 raise RuntimeError(
-                    "FalkorDB Lite requires Python 3.12+ and graphiti-core[falkordblite]. "
+                    "FalkorDB Lite requires graphiti-core[falkordblite]. "
                     "Run: pip install 'graphiti-core[falkordblite]'"
                 ) from exc
             db_path = os.environ.get(
@@ -642,20 +686,14 @@ class GraphitiMemoryProvider(_MemoryBase):
             )
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             falkor_client = AsyncFalkorDB(dbfilename=db_path)
-            kwargs = {"graph_driver": FalkorDriver(falkor_db=falkor_client)}
-            if llm_client:
-                kwargs["llm_client"] = llm_client
-            return Graphiti(**kwargs)
+            common_kwargs["graph_driver"] = FalkorDriver(falkor_db=falkor_client)
+            return Graphiti(**common_kwargs)
 
         # Neo4j — default for production / multi-user / gateway deployments
-        kwargs = {
-            "uri": os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687"),
-            "user": os.environ.get("GRAPHITI_NEO4J_USER", "neo4j"),
-            "password": os.environ.get("GRAPHITI_NEO4J_PASSWORD", "password"),
-        }
-        if llm_client:
-            kwargs["llm_client"] = llm_client
-        return Graphiti(**kwargs)
+        common_kwargs["uri"] = os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687")
+        common_kwargs["user"] = os.environ.get("GRAPHITI_NEO4J_USER", "neo4j")
+        common_kwargs["password"] = os.environ.get("GRAPHITI_NEO4J_PASSWORD", "password")
+        return Graphiti(**common_kwargs)
 
 
     # ------------------------------------------------------------------
@@ -742,8 +780,17 @@ class GraphitiMemoryProvider(_MemoryBase):
 # Hermes plugin entry point
 # ------------------------------------------------------------------
 
-def register() -> GraphitiMemoryProvider:
-    return GraphitiMemoryProvider()
+def register(ctx: Any = None) -> GraphitiMemoryProvider:
+    """Entry point for Hermes plugin discovery.
+
+    Hermes calls ``register(collector)`` where *collector* has a
+    ``register_memory_provider`` method.  We support both the
+    collector-based call and a no-arg call for standalone use.
+    """
+    provider = GraphitiMemoryProvider()
+    if ctx is not None and hasattr(ctx, "register_memory_provider"):
+        ctx.register_memory_provider(provider)
+    return provider
 
 
 # ------------------------------------------------------------------
@@ -866,9 +913,57 @@ def _build_llm_client(extraction: Any = None) -> Any | None:
         )
         if base_url:
             cfg.base_url = base_url
+
+        # Read API key from hermes .env if not already in os.environ.
+        # Hermes loads ~/.hermes/.env via load_env() but doesn't always
+        # set os.environ — graphiti needs the key for OpenAI-compatible calls.
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            try:
+                from hermes_cli.config import load_env
+                api_key = load_env().get("OPENAI_API_KEY")
+            except Exception:
+                pass
+        if api_key:
+            cfg.api_key = api_key
+
         return OpenAIClient(cfg)
     except Exception as exc:
         log.debug("Could not build custom LLM client (%s); using Graphiti default.", exc)
+        return None
+
+
+def _build_embedder(embedder_cfg: Any = None) -> Any | None:
+    """Build a Graphiti EmbedderClient from config.
+
+    If no embedder config is provided, falls back to Graphiti's default
+    OpenAIEmbedder (reads OPENAI_API_KEY from env). When the extraction
+    provider uses OpenRouter (which has no /embeddings endpoint), we
+    must configure a separate embedding endpoint — otherwise the default
+    embedder fails with 401.
+    """
+    model = (embedder_cfg and getattr(embedder_cfg, "model", None)) or None
+    base_url = (embedder_cfg and getattr(embedder_cfg, "base_url", None)) or None
+    api_key = (embedder_cfg and getattr(embedder_cfg, "api_key", None)) or None
+
+    # If nothing configured, let Graphiti use its default
+    if not model and not base_url:
+        return None
+
+    try:
+        from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+
+        embedder_config = OpenAIEmbedderConfig()
+        if model:
+            embedder_config.embedding_model = model
+        if base_url:
+            embedder_config.base_url = base_url
+        if api_key:
+            embedder_config.api_key = api_key
+
+        return OpenAIEmbedder(config=embedder_config)
+    except Exception as exc:
+        log.debug("Could not build custom embedder (%s); using Graphiti default.", exc)
         return None
 
 
