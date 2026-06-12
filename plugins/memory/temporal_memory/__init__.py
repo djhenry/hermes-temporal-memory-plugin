@@ -834,8 +834,17 @@ def register(ctx: Any = None) -> TemporalMemoryProvider:
     collector-based call and a no-arg call for standalone use.
     """
     provider = TemporalMemoryProvider()
-    if ctx is not None and hasattr(ctx, "register_memory_provider"):
-        ctx.register_memory_provider(provider)
+    if ctx is not None:
+        if hasattr(ctx, "register_memory_provider"):
+            ctx.register_memory_provider(provider)
+        if hasattr(ctx, "register_cli_command"):
+            from .cli import register_cli
+            ctx.register_cli_command(
+                name="temporal-memory",
+                help="Manage the temporal memory plugin",
+                setup_fn=register_cli,
+                description="Temporal memory plugin CLI: status, clear, export, migrate",
+            )
     return provider
 
 
