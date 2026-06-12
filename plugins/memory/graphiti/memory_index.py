@@ -238,6 +238,9 @@ class MemoryIndexManager:
 
         Caller must hold _lock.
         """
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+
         if self._memory_md.exists():
             text = self._memory_md.read_text(encoding="utf-8")
         else:
@@ -249,10 +252,13 @@ class MemoryIndexManager:
         if start != -1 and end_marker_pos != -1:
             end = end_marker_pos + len(FENCE_END)
             new_text = text[:start] + new_content + text[end:]
+            _logger.debug("[graphiti] _write_entry: replacing existing index block (%d chars)", len(new_content))
         else:
             separator = ENTRY_SEP if text.strip() else ""
             new_text = text + separator + new_content
+            _logger.debug("[graphiti] _write_entry: appending new index block (%d chars)", len(new_content))
 
+        _logger.debug("[graphiti] _write_entry: index content:\n%s", new_content)
         _atomic_write(self._memory_md, new_text)
 
 

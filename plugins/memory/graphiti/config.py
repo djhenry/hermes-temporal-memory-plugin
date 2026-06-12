@@ -10,7 +10,10 @@ from pydantic import BaseModel, Field
 class ExtractionConfig(BaseModel):
     provider: Literal["openai", "anthropic", "gemini", "groq", "ollama", "inherit"] = "inherit"
     model: str | None = None
-    base_url: str | None = None  # used for ollama
+    base_url: str | None = None  # used for ollama / LM Studio / any OpenAI-compatible endpoint
+    api_key: str | None = None   # override OPENAI_API_KEY for local providers (e.g. "lm-studio")
+    # json_object: wide proxy compat (OpenRouter). json_schema: local models (LM Studio, Ollama).
+    structured_output_mode: Literal["json_schema", "json_object", "text"] = "json_schema"
 
 
 class EmbedderConfig(BaseModel):

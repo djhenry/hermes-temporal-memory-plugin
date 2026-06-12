@@ -252,6 +252,7 @@ class GraphitiMemoryProvider(_MemoryBase):
             )
             memory_dir = hermes_home / "memories"
             self._index = MemoryIndexManager(memory_dir, max_tokens=self._cfg.max_index_tokens)
+            log.debug("[graphiti] index manager created: dir=%s, max_tokens=%d", memory_dir, self._cfg.max_index_tokens)
 
             # Seed index from existing graph entities in a background thread
             # so initialize() itself never blocks on a network call.
@@ -260,6 +261,9 @@ class GraphitiMemoryProvider(_MemoryBase):
                 daemon=True,
                 name="graphiti-index-seed",
             ).start()
+            log.debug("[graphiti] index seed thread started")
+        else:
+            log.debug("[graphiti] memory index disabled")
 
     def shutdown(self) -> None:
         if self._sync_thread and self._sync_thread.is_alive():
@@ -326,6 +330,7 @@ class GraphitiMemoryProvider(_MemoryBase):
     # ------------------------------------------------------------------
 
     def sync_turn(self, user_content: str, assistant_content: str, messages: Any = None, session_id: str = "") -> None:
+        log.info("[graphiti] sync_turn CALLED: session=%s, user_len=%d, assistant_len=%d", session_id, len(user_content), len(assistant_content))
         # Join previous sync thread with short timeout before starting the next
         with self._sync_lock:
             if self._sync_thread and self._sync_thread.is_alive():
@@ -559,7 +564,16 @@ class GraphitiMemoryProvider(_MemoryBase):
                 new_nodes = getattr(result, "nodes", []) or []
                 new_edges = getattr(result, "edges", []) or []
 
-                # Phase 3: log superseded facts so the user can see what the agent learned.
+                log.debug(
+                    "[graphiti] sync_turn: extracted %d nodes, %d edges",
+                    len(new_nodes), len(new_edges),
+                )
+                for node in new_nodes:
+                    log.debug(
+                        "[graphiti] new node: name=%s labels=%s",
+                        getattr(node, "name", "?"),
+                        getattr(node, "labels", []),
+                    )
                 for edge in new_edges:
                     if getattr(edge, "invalid_at", None):
                         log.info(
@@ -569,7 +583,14 @@ class GraphitiMemoryProvider(_MemoryBase):
 
                 # Update recall-trigger index with newly extracted entities
                 if self._index and (new_nodes or new_edges):
+                    log.debug("[graphiti] updating index with %d nodes, %d edges", len(new_nodes), len(new_edges))
                     self._index.update_from_episode(new_nodes, new_edges)
+                    log.info(
+                        "[graphiti] index updated: +%d nodes, +%d edges (total entities: see MEMORY.md)",
+                        len(new_nodes), len(new_edges),
+                    )
+                elif not self._index:
+                    log.debug("[graphiti] index disabled (enable_memory_index=False)")
         except Exception as exc:
             log.warning("graphiti sync_turn ingestion failed: %s", exc)
 
@@ -587,10 +608,12 @@ class GraphitiMemoryProvider(_MemoryBase):
 
     def _seed_index_from_graph(self) -> None:
         if not self._index or not self._client:
+            log.debug("[graphiti] seed_index: skipped (index=%s, client=%s)", bool(self._index), bool(self._client))
             return
         _NODE_LIMIT = 500
         _EDGE_LIMIT = 1000
         try:
+            log.debug("[graphiti] seed_index: fetching nodes/edges for group %s", self._group_id)
             nodes = self._run(self._client.nodes.entity.get_by_group_ids(
                 group_ids=[self._group_id],
                 limit=_NODE_LIMIT,
@@ -599,24 +622,47 @@ class GraphitiMemoryProvider(_MemoryBase):
                 group_ids=[self._group_id],
                 limit=_EDGE_LIMIT,
             ))
+            node_count = len(nodes or [])
+            edge_count = len(edges or [])
+            log.debug("[graphiti] seed_index: fetched %d nodes, %d edges", node_count, edge_count)
             if nodes and len(nodes) >= _NODE_LIMIT:
                 log.warning(
                     "graphiti index seed: fetched %d nodes (limit). Some entities may be "
                     "missing '· history available' hints. Increase limit or run full refresh.",
                     _NODE_LIMIT,
                 )
+            # Log entity names for debugging
+            for node in (nodes or [])[:20]:
+                labels = getattr(node, "labels", []) or []
+                skip = {"__Entity__", "Entity", "Node"}
+                label = next((l for l in labels if l not in skip), "Other")
+                log.debug(
+                    "[graphiti] seed entity: name=%s label=%s",
+                    getattr(node, "name", "?"),
+                    label,
+                )
             self._index.seed_from_graph(nodes or [], edges or [])
+            log.info("[graphiti] index seeded: %d entities, %d facts from graph", node_count, edge_count)
         except Exception as exc:
             log.warning("graphiti index seed failed: %s", exc)
 
     def _full_index_refresh(self) -> None:
         if not self._index or not self._client:
+            log.debug("[graphiti] full_refresh: skipped (index=%s, client=%s)", bool(self._index), bool(self._client))
             return
         try:
+            log.debug("[graphiti] full_refresh: building communities for group %s", self._group_id)
             communities, _ = self._run(self._client.build_communities(
                 group_ids=[self._group_id]
             ))
+            log.debug("[graphiti] full_refresh: built %d communities", len(communities or []))
+            for comm in (communities or [])[:10]:
+                log.debug(
+                    "[graphiti] community: name=%s",
+                    getattr(comm, "name", "?"),
+                )
             self._index.full_refresh(communities or [])
+            log.debug("[graphiti] full_refresh: index rebuilt from communities")
         except Exception as exc:
             log.warning("graphiti index full refresh failed: %s", exc)
 
@@ -885,14 +931,9 @@ def _create_kuzu_fts_indices(kuzu_driver: Any) -> None:
 def _build_llm_client(extraction: Any = None) -> Any | None:
     """Build a Graphiti LLMClient from config or env vars.
 
-    Config values (extraction.model, extraction.base_url) take precedence over
-    the equivalent env vars (GRAPHITI_LLM_MODEL, OPENAI_BASE_URL).
-    Supports any OpenAI-compatible endpoint — including OpenRouter for free/cheap
-    models in CI. Returns None to let Graphiti use its default.
-
-    Note: extraction.provider is not yet wired; only the OpenAI-compatible client
-    is built regardless of provider value. Set extraction.provider=inherit to rely
-    on Graphiti's default client (reads OPENAI_API_KEY itself).
+    Uses OpenAIGenericClient which works with any OpenAI-compatible endpoint
+    (OpenRouter, LM Studio, Ollama, etc.) via standard json_schema/json_object
+    response_format instead of OpenAI's native structured output API.
     """
     model = (
         (extraction and getattr(extraction, "model", None))
@@ -903,7 +944,7 @@ def _build_llm_client(extraction: Any = None) -> Any | None:
         return None
 
     try:
-        from graphiti_core.llm_client.openai_client import OpenAIClient  # type: ignore[import]
+        from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient  # type: ignore[import]
         from graphiti_core.llm_client.config import LLMConfig  # type: ignore[import]
 
         cfg = LLMConfig(model=model)
@@ -914,10 +955,11 @@ def _build_llm_client(extraction: Any = None) -> Any | None:
         if base_url:
             cfg.base_url = base_url
 
-        # Read API key from hermes .env if not already in os.environ.
-        # Hermes loads ~/.hermes/.env via load_env() but doesn't always
-        # set os.environ — graphiti needs the key for OpenAI-compatible calls.
-        api_key = os.environ.get("OPENAI_API_KEY")
+        # Prefer an explicit api_key from extraction config (e.g. "lm-studio" for
+        # local providers), then fall back to OPENAI_API_KEY from env or hermes .env.
+        api_key = (extraction and getattr(extraction, "api_key", None)) or None
+        if not api_key:
+            api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             try:
                 from hermes_cli.config import load_env
@@ -927,7 +969,10 @@ def _build_llm_client(extraction: Any = None) -> Any | None:
         if api_key:
             cfg.api_key = api_key
 
-        return OpenAIClient(cfg)
+        # structured_output_mode: json_schema for local providers (LM Studio, Ollama);
+        # json_object for OpenRouter and other proxies that don't support json_schema.
+        output_mode = (extraction and getattr(extraction, "structured_output_mode", None)) or "json_schema"
+        return OpenAIGenericClient(cfg, structured_output_mode=output_mode)
     except Exception as exc:
         log.debug("Could not build custom LLM client (%s); using Graphiti default.", exc)
         return None
