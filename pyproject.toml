@@ -3,9 +3,9 @@ requires = ["setuptools>=42", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hermes-graphiti"
-version = "0.1.0"
-description = "Temporal knowledge-graph memory provider for Hermes Agent (Graphiti / Zep)"
+name = "hermes-temporal-memory-plugin"
+version = "0.2.0"
+description = "Temporal knowledge-graph memory provider for Hermes Agent (pluggable backend, ships with Graphiti/Zep)"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 dependencies = [
@@ -23,7 +23,7 @@ neo4j = ["neo4j>=5.0"]
 dev = ["pytest>=8.0", "pytest-asyncio", "pytest-timeout"]
 
 [project.entry-points."hermes.memory.providers"]
-graphiti = "plugins.memory.graphiti:register"
+temporal-memory = "plugins.memory.temporal_memory:register"
 
 [tool.setuptools.packages.find]
 where = ["."]

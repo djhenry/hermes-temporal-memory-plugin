@@ -1,7 +1,7 @@
-"""Graphiti temporal knowledge-graph memory provider for Hermes Agent.
+"""Temporal knowledge-graph memory provider for Hermes Agent.
 
 Implements the MemoryProvider interface with:
-- Hybrid graph+vector+BM25 retrieval via Graphiti (Zep)
+- Hybrid graph+vector+BM25 retrieval via a pluggable backend (ships with Graphiti/Zep)
 - Bi-temporal fact storage (valid_at / invalid_at windows)
 - MEMORY.md recall-trigger index: a plugin-owned section that surfaces
   what topics are available in deep memory without bloating the prompt
@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import GraphitiConfig
+from .config import TemporalMemoryConfig
 from .memory_index import MemoryIndexManager
 
 log = logging.getLogger(__name__)
@@ -113,12 +113,12 @@ FACT_CORRECT_SCHEMA = {
 # Memory-context fence tag (stripped before graph ingestion) --------------
 _CONTEXT_FENCE_TAG = "<memory-context>"
 _CONTEXT_FENCE_END = "</memory-context>"
-_INDEX_FENCE_START = "<!-- graphiti-index:start -->"
-_INDEX_FENCE_END = "<!-- graphiti-index:end -->"
+_INDEX_FENCE_START = "<!-- temporal-memory-index:start -->"
+_INDEX_FENCE_END = "<!-- temporal-memory-index:end -->"
 
 SYSTEM_PROMPT_BLOCK = (
     'The "Temporal Memory Index" section in MEMORY.md is automatically maintained '
-    "by the graphiti memory plugin. It summarises what topics and entities are "
+    "by the temporal memory plugin. It summarises what topics and entities are "
     "available in deep memory. Do not edit or delete it manually. "
     "To retrieve full details, timelines, or historical facts, use the "
     "temporal_search, fact_history, or graph_browse tools."
@@ -128,15 +128,15 @@ SYSTEM_PROMPT_BLOCK = (
 # -------------------------------------------------------------------------
 
 
-class GraphitiMemoryProvider(_MemoryBase):
-    """Hermes MemoryProvider backed by Graphiti temporal knowledge graph."""
+class TemporalMemoryProvider(_MemoryBase):
+    """Hermes MemoryProvider backed by a temporal knowledge graph."""
 
-    name = "graphiti"
+    name = "temporal-memory"
 
     def __init__(self) -> None:
         self._client: Any = None
         self._group_id: str = ""
-        self._cfg: GraphitiConfig = GraphitiConfig()
+        self._cfg: TemporalMemoryConfig = TemporalMemoryConfig()
         self._index: MemoryIndexManager | None = None
         self._sync_thread: threading.Thread | None = None
         self._sync_lock = threading.Lock()
@@ -158,7 +158,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         self._async_thread = threading.Thread(
             target=self._async_loop.run_forever,
             daemon=True,
-            name="graphiti-async",
+            name="temporal-memory-async",
         )
         self._async_thread.start()
 
@@ -174,7 +174,7 @@ class GraphitiMemoryProvider(_MemoryBase):
             # break FalkorDB Lite's loop-bound connections. Close the coroutine
             # to prevent ResourceWarning and raise so callers can log/skip.
             coro.close()
-            raise RuntimeError("graphiti async loop is not running (shutting down?)")
+            raise RuntimeError("temporal-memory async loop is not running (shutting down?)")
         return _run_sync(coro)
 
     # ------------------------------------------------------------------
@@ -195,7 +195,7 @@ class GraphitiMemoryProvider(_MemoryBase):
     # ------------------------------------------------------------------
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
-        log.info("graphiti: initialize() called for session %s", session_id)
+        log.info("temporal-memory: initialize() called for session %s", session_id)
         cfg_dict = kwargs.get("config", {})
         if not cfg_dict:
             # Hermes doesn't pass plugins.<name> config to initialize().
@@ -203,11 +203,11 @@ class GraphitiMemoryProvider(_MemoryBase):
             try:
                 from hermes_cli.config import load_config, cfg_get
                 full_cfg = load_config()
-                cfg_dict = cfg_get(full_cfg, "plugins", "graphiti") or {}
+                cfg_dict = cfg_get(full_cfg, "plugins", "temporal-memory") or {}
             except Exception:
                 cfg_dict = {}
         if isinstance(cfg_dict, dict):
-            self._cfg = GraphitiConfig(**cfg_dict)
+            self._cfg = TemporalMemoryConfig(**cfg_dict)
 
         # Ensure OPENAI_API_KEY is in os.environ for Graphiti's embedder.
         # Hermes reads ~/.hermes/.env via load_env() but doesn't always
@@ -232,18 +232,18 @@ class GraphitiMemoryProvider(_MemoryBase):
         try:
             self._client = self._build_client()
         except Exception as exc:
-            log.error("graphiti: _build_client() failed: %s", exc, exc_info=True)
+            log.error("temporal-memory: _build_client() failed: %s", exc, exc_info=True)
             raise
 
-        # KuzuDriver never sets _database (graphiti-core bug); patch it here so
-        # graphiti.py's `group_id != driver._database` check doesn't throw.
+        # KuzuDriver never sets _database (backend bug); patch it here so
+        # the backend driver.s `group_id != driver._database` check doesn.t throw.
         _patch_kuzu_database(self._client, self._group_id)
 
         # Create graph indices/constraints (no-op for Kuzu; required for Neo4j/FalkorDB).
         try:
             self._run(self._client.build_indices_and_constraints())
         except Exception as exc:
-            log.warning("graphiti build_indices_and_constraints failed (continuing): %s", exc)
+            log.warning("temporal-memory build_indices_and_constraints failed (continuing): %s", exc)
 
         # Build the MEMORY.md index manager
         if self._cfg.enable_memory_index:
@@ -252,18 +252,18 @@ class GraphitiMemoryProvider(_MemoryBase):
             )
             memory_dir = hermes_home / "memories"
             self._index = MemoryIndexManager(memory_dir, max_tokens=self._cfg.max_index_tokens)
-            log.debug("[graphiti] index manager created: dir=%s, max_tokens=%d", memory_dir, self._cfg.max_index_tokens)
+            log.debug("[temporal-memory] index manager created: dir=%s, max_tokens=%d", memory_dir, self._cfg.max_index_tokens)
 
             # Seed index from existing graph entities in a background thread
             # so initialize() itself never blocks on a network call.
             threading.Thread(
                 target=self._seed_index_from_graph,
                 daemon=True,
-                name="graphiti-index-seed",
+                name="temporal-memory-index-seed",
             ).start()
-            log.debug("[graphiti] index seed thread started")
+            log.debug("[temporal-memory] index seed thread started")
         else:
-            log.debug("[graphiti] memory index disabled")
+            log.debug("[temporal-memory] memory index disabled")
 
     def shutdown(self) -> None:
         if self._sync_thread and self._sync_thread.is_alive():
@@ -303,7 +303,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         try:
             edges: list = self._search_edges(query, num_results=10)
         except Exception as exc:
-            log.warning("graphiti prefetch failed: %s", exc)
+            log.warning("temporal-memory prefetch failed: %s", exc)
             return None
 
         if not edges:
@@ -330,7 +330,7 @@ class GraphitiMemoryProvider(_MemoryBase):
     # ------------------------------------------------------------------
 
     def sync_turn(self, user_content: str, assistant_content: str, messages: Any = None, session_id: str = "") -> None:
-        log.info("[graphiti] sync_turn CALLED: session=%s, user_len=%d, assistant_len=%d", session_id, len(user_content), len(assistant_content))
+        log.info("[temporal-memory] sync_turn CALLED: session=%s, user_len=%d, assistant_len=%d", session_id, len(user_content), len(assistant_content))
         # Join previous sync thread with short timeout before starting the next
         with self._sync_lock:
             if self._sync_thread and self._sync_thread.is_alive():
@@ -340,7 +340,7 @@ class GraphitiMemoryProvider(_MemoryBase):
                 target=self._ingest_turn,
                 args=(user_content, assistant_content),
                 daemon=True,
-                name="graphiti-sync",
+                name="temporal-memory-sync",
             )
             self._sync_thread.start()
 
@@ -356,7 +356,7 @@ class GraphitiMemoryProvider(_MemoryBase):
                 target=self._mirror_memory_write,
                 args=(action, target, content),
                 daemon=True,
-                name="graphiti-mirror",
+                name="temporal-memory-mirror",
             ).start()
 
         # Update the recall-trigger index
@@ -373,7 +373,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         threading.Thread(
             target=self._full_index_refresh,
             daemon=True,
-            name="graphiti-index-refresh",
+            name="temporal-memory-index-refresh",
         ).start()
 
     # ------------------------------------------------------------------
@@ -439,7 +439,7 @@ class GraphitiMemoryProvider(_MemoryBase):
             ))
             return result.edges
         except Exception as exc:
-            log.warning("graphiti BM25 fallback search failed: %s", exc)
+            log.warning("temporal-memory BM25 fallback search failed: %s", exc)
             return []
 
     # ------------------------------------------------------------------
@@ -565,34 +565,34 @@ class GraphitiMemoryProvider(_MemoryBase):
                 new_edges = getattr(result, "edges", []) or []
 
                 log.debug(
-                    "[graphiti] sync_turn: extracted %d nodes, %d edges",
+                    "[temporal-memory] sync_turn: extracted %d nodes, %d edges",
                     len(new_nodes), len(new_edges),
                 )
                 for node in new_nodes:
                     log.debug(
-                        "[graphiti] new node: name=%s labels=%s",
+                        "[temporal-memory] new node: name=%s labels=%s",
                         getattr(node, "name", "?"),
                         getattr(node, "labels", []),
                     )
                 for edge in new_edges:
                     if getattr(edge, "invalid_at", None):
                         log.info(
-                            "[graphiti] Superseded: %s",
+                            "[temporal-memory] Superseded: %s",
                             getattr(edge, "fact", "unknown fact"),
                         )
 
                 # Update recall-trigger index with newly extracted entities
                 if self._index and (new_nodes or new_edges):
-                    log.debug("[graphiti] updating index with %d nodes, %d edges", len(new_nodes), len(new_edges))
+                    log.debug("[temporal-memory] updating index with %d nodes, %d edges", len(new_nodes), len(new_edges))
                     self._index.update_from_episode(new_nodes, new_edges)
                     log.info(
-                        "[graphiti] index updated: +%d nodes, +%d edges (total entities: see MEMORY.md)",
+                        "[temporal-memory] index updated: +%d nodes, +%d edges (total entities: see MEMORY.md)",
                         len(new_nodes), len(new_edges),
                     )
                 elif not self._index:
-                    log.debug("[graphiti] index disabled (enable_memory_index=False)")
+                    log.debug("[temporal-memory] index disabled (enable_memory_index=False)")
         except Exception as exc:
-            log.warning("graphiti sync_turn ingestion failed: %s", exc)
+            log.warning("temporal-memory sync_turn ingestion failed: %s", exc)
 
     def _mirror_memory_write(self, action: str, target: str, content: str) -> None:
         try:
@@ -604,16 +604,16 @@ class GraphitiMemoryProvider(_MemoryBase):
                 group_id=self._group_id,
             ))
         except Exception as exc:
-            log.warning("graphiti memory mirror failed: %s", exc)
+            log.warning("temporal-memory memory mirror failed: %s", exc)
 
     def _seed_index_from_graph(self) -> None:
         if not self._index or not self._client:
-            log.debug("[graphiti] seed_index: skipped (index=%s, client=%s)", bool(self._index), bool(self._client))
+            log.debug("[temporal-memory] seed_index: skipped (index=%s, client=%s)", bool(self._index), bool(self._client))
             return
         _NODE_LIMIT = 500
         _EDGE_LIMIT = 1000
         try:
-            log.debug("[graphiti] seed_index: fetching nodes/edges for group %s", self._group_id)
+            log.debug("[temporal-memory] seed_index: fetching nodes/edges for group %s", self._group_id)
             nodes = self._run(self._client.nodes.entity.get_by_group_ids(
                 group_ids=[self._group_id],
                 limit=_NODE_LIMIT,
@@ -624,10 +624,10 @@ class GraphitiMemoryProvider(_MemoryBase):
             ))
             node_count = len(nodes or [])
             edge_count = len(edges or [])
-            log.debug("[graphiti] seed_index: fetched %d nodes, %d edges", node_count, edge_count)
+            log.debug("[temporal-memory] seed_index: fetched %d nodes, %d edges", node_count, edge_count)
             if nodes and len(nodes) >= _NODE_LIMIT:
                 log.warning(
-                    "graphiti index seed: fetched %d nodes (limit). Some entities may be "
+                    "temporal-memory index seed: fetched %d nodes (limit). Some entities may be "
                     "missing '· history available' hints. Increase limit or run full refresh.",
                     _NODE_LIMIT,
                 )
@@ -637,34 +637,34 @@ class GraphitiMemoryProvider(_MemoryBase):
                 skip = {"__Entity__", "Entity", "Node"}
                 label = next((l for l in labels if l not in skip), "Other")
                 log.debug(
-                    "[graphiti] seed entity: name=%s label=%s",
+                    "[temporal-memory] seed entity: name=%s label=%s",
                     getattr(node, "name", "?"),
                     label,
                 )
             self._index.seed_from_graph(nodes or [], edges or [])
-            log.info("[graphiti] index seeded: %d entities, %d facts from graph", node_count, edge_count)
+            log.info("[temporal-memory] index seeded: %d entities, %d facts from graph", node_count, edge_count)
         except Exception as exc:
-            log.warning("graphiti index seed failed: %s", exc)
+            log.warning("temporal-memory index seed failed: %s", exc)
 
     def _full_index_refresh(self) -> None:
         if not self._index or not self._client:
-            log.debug("[graphiti] full_refresh: skipped (index=%s, client=%s)", bool(self._index), bool(self._client))
+            log.debug("[temporal-memory] full_refresh: skipped (index=%s, client=%s)", bool(self._index), bool(self._client))
             return
         try:
-            log.debug("[graphiti] full_refresh: building communities for group %s", self._group_id)
+            log.debug("[temporal-memory] full_refresh: building communities for group %s", self._group_id)
             communities, _ = self._run(self._client.build_communities(
                 group_ids=[self._group_id]
             ))
-            log.debug("[graphiti] full_refresh: built %d communities", len(communities or []))
+            log.debug("[temporal-memory] full_refresh: built %d communities", len(communities or []))
             for comm in (communities or [])[:10]:
                 log.debug(
-                    "[graphiti] community: name=%s",
+                    "[temporal-memory] community: name=%s",
                     getattr(comm, "name", "?"),
                 )
             self._index.full_refresh(communities or [])
-            log.debug("[graphiti] full_refresh: index rebuilt from communities")
+            log.debug("[temporal-memory] full_refresh: index rebuilt from communities")
         except Exception as exc:
-            log.warning("graphiti index full refresh failed: %s", exc)
+            log.warning("temporal-memory index full refresh failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Client factory
@@ -697,7 +697,7 @@ class GraphitiMemoryProvider(_MemoryBase):
             from graphiti_core.driver.kuzu_driver import KuzuDriver  # type: ignore[import]
             db_path = os.environ.get(
                 "GRAPHITI_KUZU_PATH",
-                str(Path.home() / ".hermes" / "graphiti.kuzu"),
+                str(Path.home() / ".hermes" / "temporal-memory.kuzu"),
             )
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             kuzu_driver = KuzuDriver(db=db_path)
@@ -728,7 +728,7 @@ class GraphitiMemoryProvider(_MemoryBase):
                 ) from exc
             db_path = os.environ.get(
                 "GRAPHITI_FALKORDBLITE_PATH",
-                str(Path.home() / ".hermes" / "graphiti.fdb"),
+                str(Path.home() / ".hermes" / "temporal-memory.fdb"),
             )
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             falkor_client = AsyncFalkorDB(dbfilename=db_path)
@@ -755,7 +755,7 @@ class GraphitiMemoryProvider(_MemoryBase):
         home = Path(hermes_home)
         env_file = home / ".env"
 
-        print("\n=== Graphiti Temporal Memory Setup ===\n")
+        print("\n=== Temporal Memory Plugin Setup ===\n")
         print("Backend options:")
         print("  1. neo4j        — Neo4j via Docker (recommended for production)")
         print("  2. kuzu         — embedded, no Docker, Python 3.11+ (deprecated)")
@@ -765,27 +765,27 @@ class GraphitiMemoryProvider(_MemoryBase):
         lines: list[str] = []
 
         if choice == "2":
-            lines.append("GRAPHITI_USE_KUZU=1")
+            lines.append("TEMPORAL_MEMORY_USE_KUZU=1")
             db_path = input(
-                f"Kuzu DB path [default: {home / 'graphiti.kuzu'}]: "
-            ).strip() or str(home / "graphiti.kuzu")
-            lines.append(f"GRAPHITI_KUZU_PATH={db_path}")
+                f"Kuzu DB path [default: {home / 'temporal-memory.kuzu'}]: "
+            ).strip() or str(home / "temporal-memory.kuzu")
+            lines.append(f"TEMPORAL_MEMORY_KUZU_PATH={db_path}")
             backend_name = "kuzu"
         elif choice == "3":
-            lines.append("GRAPHITI_USE_FALKORDB_LITE=1")
+            lines.append("TEMPORAL_MEMORY_USE_FALKORDB_LITE=1")
             db_path = input(
-                f"FalkorDB path [default: {home / 'graphiti.fdb'}]: "
-            ).strip() or str(home / "graphiti.fdb")
-            lines.append(f"GRAPHITI_FALKORDBLITE_PATH={db_path}")
+                f"FalkorDB path [default: {home / 'temporal-memory.fdb'}]: "
+            ).strip() or str(home / "temporal-memory.fdb")
+            lines.append(f"TEMPORAL_MEMORY_FALKORDBLITE_PATH={db_path}")
             backend_name = "falkordblite"
         else:
             uri = input("Neo4j URI [default: bolt://localhost:7687]: ").strip() or "bolt://localhost:7687"
             user = input("Neo4j user [default: neo4j]: ").strip() or "neo4j"
             password = input("Neo4j password [default: password]: ").strip() or "password"
             lines += [
-                f"GRAPHITI_NEO4J_URI={uri}",
-                f"GRAPHITI_NEO4J_USER={user}",
-                f"GRAPHITI_NEO4J_PASSWORD={password}",
+                f"TEMPORAL_MEMORY_NEO4J_URI={uri}",
+                f"TEMPORAL_MEMORY_NEO4J_USER={user}",
+                f"TEMPORAL_MEMORY_NEO4J_PASSWORD={password}",
             ]
             backend_name = "neo4j"
 
@@ -804,36 +804,36 @@ class GraphitiMemoryProvider(_MemoryBase):
             base_url = input("Ollama base URL [default: http://localhost:11434]: ").strip() or "http://localhost:11434"
             model = input("Ollama model [default: llama3.1:8b]: ").strip() or "llama3.1:8b"
             lines += [
-                f"GRAPHITI_EXTRACTION_PROVIDER=ollama",
-                f"GRAPHITI_EXTRACTION_MODEL={model}",
-                f"GRAPHITI_EXTRACTION_BASE_URL={base_url}",
+                f"TEMPORAL_MEMORY_EXTRACTION_PROVIDER=ollama",
+                f"TEMPORAL_MEMORY_EXTRACTION_MODEL={model}",
+                f"TEMPORAL_MEMORY_EXTRACTION_BASE_URL={base_url}",
             ]
 
         # Append to .env (create if missing)
         existing = env_file.read_text() if env_file.exists() else ""
         if existing and not existing.endswith("\n"):
             existing += "\n"
-        new_block = "\n# hermes-graphiti\n" + "\n".join(lines) + "\n"
+        new_block = "\n# hermes-temporal-memory\n" + "\n".join(lines) + "\n"
         env_file.write_text(existing + new_block)
 
         print(f"\nWrote {len(lines)} variable(s) to {env_file}")
         print(f"Backend: {backend_name}")
-        print("\nTo activate: set  memory.provider: graphiti  in ~/.hermes/config.yaml")
-        print("or run:  hermes plugins enable graphiti\n")
+        print("\nTo activate: set  memory.provider: temporal-memory  in ~/.hermes/config.yaml")
+        print("or run:  hermes plugins enable temporal-memory\n")
 
 
 # ------------------------------------------------------------------
 # Hermes plugin entry point
 # ------------------------------------------------------------------
 
-def register(ctx: Any = None) -> GraphitiMemoryProvider:
+def register(ctx: Any = None) -> TemporalMemoryProvider:
     """Entry point for Hermes plugin discovery.
 
     Hermes calls ``register(collector)`` where *collector* has a
     ``register_memory_provider`` method.  We support both the
     collector-based call and a no-arg call for standalone use.
     """
-    provider = GraphitiMemoryProvider()
+    provider = TemporalMemoryProvider()
     if ctx is not None and hasattr(ctx, "register_memory_provider"):
         ctx.register_memory_provider(provider)
     return provider
@@ -873,9 +873,9 @@ def _strip_fences(text: str) -> str:
         text,
         flags=re.DOTALL,
     )
-    # Strip <!-- graphiti-index:start -->...<!-- graphiti-index:end -->
+    # Strip <!-- temporal-memory-index:start -->...<!-- temporal-memory-index:end -->
     text = re.sub(
-        r"<!--\s*graphiti-index:start\s*-->.*?<!--\s*graphiti-index:end\s*-->",
+        r"<!--\s*temporal-memory-index:start\s*-->.*?<!--\s*temporal-memory-index:end\s*-->",
         "",
         text,
         flags=re.DOTALL,
@@ -883,17 +883,17 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _patch_kuzu_database(graphiti_client: Any, group_id: str) -> None:
+def _patch_kuzu_database(client: Any, group_id: str) -> None:
     """Set _database on KuzuDriver if absent.
 
-    graphiti.py compares group_id to driver._database before deciding whether
-    to clone the driver. KuzuDriver never assigns _database (graphiti-core bug),
+    the backend driver compares group_id to driver._database before deciding whether
+    to clone the driver. KuzuDriver never assigns _database (backend bug),
     so the attribute access throws AttributeError. Setting it to the group_id
     makes the check a no-op for Kuzu, which is correct: Kuzu is single-file,
     not per-group, so no driver cloning is ever needed.
     """
     try:
-        driver = graphiti_client.driver
+        driver = client.driver
         if "Kuzu" in type(driver).__name__ and not hasattr(driver, "_database"):
             driver._database = group_id
     except Exception:
@@ -904,11 +904,11 @@ def _create_kuzu_fts_indices(kuzu_driver: Any) -> None:
     """Create FTS indices required by Kuzu search operations.
 
     KuzuDriver.setup_schema() creates node/edge tables but not the FTS indices.
-    KuzuDriver.build_indices_and_constraints() is a no-op (graphiti-core bug).
+    KuzuDriver.build_indices_and_constraints() is a no-op (backend bug).
     Without these indices, every search call fails with "table doesn't have an
     index with name edge_name_and_fact" (and similar for other tables).
 
-    Queries mirror graphiti_core.graph_queries.get_fulltext_indices(KUZU).
+    Queries mirror the backend graph_queries.get_fulltext_indices(KUZU).
     "Already exists" errors on subsequent runs are silently ignored.
     """
     try:

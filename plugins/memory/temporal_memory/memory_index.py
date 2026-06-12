@@ -7,14 +7,14 @@ knows what topics are available in the deep temporal graph.
 
 Entry format (a normal §-delimited MEMORY.md entry):
 
-    <!-- graphiti-index:start -->
+    <!-- temporal-memory-index:start -->
     ## Temporal Memory Index
     _Updated 2026-06-09 · query deeper: temporal_search, fact_history, graph_browse_
 
     **People:** Alice (colleague), Bob (running club, via Alice)
     **Places:** Madrid (2026-03 → now) · history available
     **Projects:** Helios (active), Atlas (archived)
-    <!-- graphiti-index:end -->
+    <!-- temporal-memory-index:end -->
 """
 
 from __future__ import annotations
@@ -28,10 +28,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    pass  # avoid heavy graphiti imports at module load time
+    pass  # avoid heavy backend imports at module load time
 
-FENCE_START = "<!-- graphiti-index:start -->"
-FENCE_END = "<!-- graphiti-index:end -->"
+FENCE_START = "<!-- temporal-memory-index:start -->"
+FENCE_END = "<!-- temporal-memory-index:end -->"
 ENTRY_SEP = "\n§\n"
 MAX_INDEX_TOKENS = 200  # rough char-based cap (~4 chars/token)
 MAX_INDEX_CHARS = MAX_INDEX_TOKENS * 4
@@ -252,13 +252,13 @@ class MemoryIndexManager:
         if start != -1 and end_marker_pos != -1:
             end = end_marker_pos + len(FENCE_END)
             new_text = text[:start] + new_content + text[end:]
-            _logger.debug("[graphiti] _write_entry: replacing existing index block (%d chars)", len(new_content))
+            _logger.debug("[temporal-memory] _write_entry: replacing existing index block (%d chars)", len(new_content))
         else:
             separator = ENTRY_SEP if text.strip() else ""
             new_text = text + separator + new_content
-            _logger.debug("[graphiti] _write_entry: appending new index block (%d chars)", len(new_content))
+            _logger.debug("[temporal-memory] _write_entry: appending new index block (%d chars)", len(new_content))
 
-        _logger.debug("[graphiti] _write_entry: index content:\n%s", new_content)
+        _logger.debug("[temporal-memory] _write_entry: index content:\n%s", new_content)
         _atomic_write(self._memory_md, new_text)
 
 
@@ -279,7 +279,7 @@ def _primary_label(node) -> str:
 def _atomic_write(path: Path, content: str) -> None:
     """Write content to path atomically via a temp file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".graphiti-index-")
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".temporal-memory-index-")
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:

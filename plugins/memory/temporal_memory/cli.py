@@ -1,4 +1,4 @@
-"""CLI commands: hermes graphiti status | clear | export | migrate"""
+"""CLI commands: hermes temporal-memory status | clear | export | migrate"""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from pathlib import Path
 
 
 def register_cli(subparsers) -> None:
-    p = subparsers.add_parser("graphiti", help="Manage the Graphiti temporal memory plugin")
-    sub = p.add_subparsers(dest="graphiti_cmd")
+    p = subparsers.add_parser("temporal-memory", help="Manage the temporal memory plugin")
+    sub = p.add_subparsers(dest="temporal_memory_cmd")
 
     status = sub.add_parser("status", help="Show connection state and running cost estimate")
     status.add_argument("--verbose", "-v", action="store_true")
@@ -19,7 +19,7 @@ def register_cli(subparsers) -> None:
     clear.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
 
     exp = sub.add_parser("export", help="Export the knowledge graph to JSON")
-    exp.add_argument("--output", "-o", default="graphiti-export.json")
+    exp.add_argument("--output", "-o", default="temporal-memory-export.json")
 
     mig = sub.add_parser("migrate", help="Migrate local Kuzu graph to Neo4j")
     mig.add_argument("--to", choices=["neo4j"], required=True)
@@ -28,7 +28,7 @@ def register_cli(subparsers) -> None:
 
 
 def _dispatch(args) -> None:
-    cmd = getattr(args, "graphiti_cmd", None) or "status"
+    cmd = getattr(args, "temporal_memory_cmd", None) or "status"
     if cmd == "status":
         _cmd_status(args)
     elif cmd == "clear":
@@ -46,33 +46,33 @@ def _dispatch(args) -> None:
 def _cmd_status(args) -> None:
     profile = os.environ.get("HERMES_PROFILE", "default")
     group_id = f"hermes-{profile}"
-    use_kuzu = bool(os.environ.get("GRAPHITI_USE_KUZU"))
-    use_falkordblite = bool(os.environ.get("GRAPHITI_USE_FALKORDB_LITE"))
+    use_kuzu = bool(os.environ.get("TEMPORAL_MEMORY_USE_KUZU"))
+    use_falkordblite = bool(os.environ.get("TEMPORAL_MEMORY_USE_FALKORDB_LITE"))
     if use_kuzu:
         backend = "kuzu"
     elif use_falkordblite:
         backend = "falkordblite"
     else:
-        backend = os.environ.get("GRAPHITI_BACKEND", "neo4j")
+        backend = os.environ.get("TEMPORAL_MEMORY_BACKEND", "neo4j")
 
-    print("Graphiti memory plugin")
+    print("Temporal memory plugin")
     print(f"  backend  : {backend}")
     print(f"  group_id : {group_id}")
 
     if use_kuzu or backend == "kuzu":
         db_path = os.environ.get(
-            "GRAPHITI_KUZU_PATH", str(Path.home() / ".hermes" / "graphiti.kuzu")
+            "TEMPORAL_MEMORY_KUZU_PATH", str(Path.home() / ".hermes" / "temporal-memory.kuzu")
         )
         print(f"  db       : {db_path}")
         print(f"  db found : {'yes' if Path(db_path).exists() else 'no (not yet initialised)'}")
     elif use_falkordblite or backend == "falkordblite":
         db_path = os.environ.get(
-            "GRAPHITI_FALKORDBLITE_PATH", str(Path.home() / ".hermes" / "graphiti.fdb")
+            "TEMPORAL_MEMORY_FALKORDBLITE_PATH", str(Path.home() / ".hermes" / "temporal-memory.fdb")
         )
         print(f"  db       : {db_path}")
         print(f"  db found : {'yes' if Path(db_path).exists() else 'no (not yet initialised)'}")
     else:
-        uri = os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687")
+        uri = os.environ.get("TEMPORAL_MEMORY_NEO4J_URI", "bolt://localhost:7687")
         print(f"  uri      : {uri}")
         if getattr(args, "verbose", False):
             _check_neo4j_connectivity(uri)
@@ -85,8 +85,8 @@ def _check_neo4j_connectivity(uri: str) -> None:
     try:
         from neo4j import GraphDatabase  # type: ignore[import]
 
-        user = os.environ.get("GRAPHITI_NEO4J_USER", "neo4j")
-        password = os.environ.get("GRAPHITI_NEO4J_PASSWORD", "password")
+        user = os.environ.get("TEMPORAL_MEMORY_NEO4J_USER", "neo4j")
+        password = os.environ.get("TEMPORAL_MEMORY_NEO4J_PASSWORD", "password")
         driver = GraphDatabase.driver(uri, auth=(user, password))
         driver.verify_connectivity()
         driver.close()
@@ -125,14 +125,14 @@ def _cmd_clear(args) -> None:
             print("Aborted.")
             return
 
-    use_kuzu = bool(os.environ.get("GRAPHITI_USE_KUZU"))
-    use_falkordblite = bool(os.environ.get("GRAPHITI_USE_FALKORDB_LITE"))
+    use_kuzu = bool(os.environ.get("TEMPORAL_MEMORY_USE_KUZU"))
+    use_falkordblite = bool(os.environ.get("TEMPORAL_MEMORY_USE_FALKORDB_LITE"))
     if use_kuzu:
         backend = "kuzu"
     elif use_falkordblite:
         backend = "falkordblite"
     else:
-        backend = os.environ.get("GRAPHITI_BACKEND", "neo4j")
+        backend = os.environ.get("TEMPORAL_MEMORY_BACKEND", "neo4j")
 
     try:
         client = _make_client(backend, use_kuzu)
@@ -158,14 +158,14 @@ def _cmd_export(args) -> None:
     profile = os.environ.get("HERMES_PROFILE", "default")
     group_id = f"hermes-{profile}"
     output = args.output
-    use_kuzu = bool(os.environ.get("GRAPHITI_USE_KUZU"))
-    use_falkordblite = bool(os.environ.get("GRAPHITI_USE_FALKORDB_LITE"))
+    use_kuzu = bool(os.environ.get("TEMPORAL_MEMORY_USE_KUZU"))
+    use_falkordblite = bool(os.environ.get("TEMPORAL_MEMORY_USE_FALKORDB_LITE"))
     if use_kuzu:
         backend = "kuzu"
     elif use_falkordblite:
         backend = "falkordblite"
     else:
-        backend = os.environ.get("GRAPHITI_BACKEND", "neo4j")
+        backend = os.environ.get("TEMPORAL_MEMORY_BACKEND", "neo4j")
 
     try:
         client = _make_client(backend, use_kuzu)
@@ -218,13 +218,13 @@ def _cmd_migrate(args) -> None:
         return
 
     kuzu_path = os.environ.get(
-        "GRAPHITI_KUZU_PATH", str(Path.home() / ".hermes" / "graphiti.kuzu")
+        "TEMPORAL_MEMORY_KUZU_PATH", str(Path.home() / ".hermes" / "temporal-memory.kuzu")
     )
     if not Path(kuzu_path).exists():
         print(f"No Kuzu graph found at {kuzu_path}. Nothing to migrate.")
         return
 
-    neo4j_uri = os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687")
+    neo4j_uri = os.environ.get("TEMPORAL_MEMORY_NEO4J_URI", "bolt://localhost:7687")
     profile = os.environ.get("HERMES_PROFILE", "default")
     group_id = f"hermes-{profile}"
 
@@ -255,8 +255,8 @@ async def _migrate_kuzu_to_neo4j(kuzu_path: str, neo4j_uri: str, group_id: str) 
     print(f"  read {len(nodes or [])} entities, {len(edges or [])} facts from Kuzu")
 
     # Write to Neo4j
-    neo4j_user = os.environ.get("GRAPHITI_NEO4J_USER", "neo4j")
-    neo4j_password = os.environ.get("GRAPHITI_NEO4J_PASSWORD", "password")
+    neo4j_user = os.environ.get("TEMPORAL_MEMORY_NEO4J_USER", "neo4j")
+    neo4j_password = os.environ.get("TEMPORAL_MEMORY_NEO4J_PASSWORD", "password")
     dst = Graphiti(uri=neo4j_uri, user=neo4j_user, password=neo4j_password)
     await dst.build_indices_and_constraints()
 
@@ -288,11 +288,11 @@ def _make_client(backend: str, use_kuzu: bool):
         from graphiti_core.driver.kuzu_driver import KuzuDriver  # type: ignore[import]
 
         db_path = os.environ.get(
-            "GRAPHITI_KUZU_PATH", str(Path.home() / ".hermes" / "graphiti.kuzu")
+            "TEMPORAL_MEMORY_KUZU_PATH", str(Path.home() / ".hermes" / "temporal-memory.kuzu")
         )
         return Graphiti(graph_driver=KuzuDriver(db=db_path))
 
-    use_falkordblite = bool(os.environ.get("GRAPHITI_USE_FALKORDB_LITE") or backend == "falkordblite")
+    use_falkordblite = bool(os.environ.get("TEMPORAL_MEMORY_USE_FALKORDB_LITE") or backend == "falkordblite")
     if use_falkordblite:
         from graphiti_core.driver.falkordb_driver import FalkorDriver  # type: ignore[import]
         try:
@@ -303,14 +303,14 @@ def _make_client(backend: str, use_kuzu: bool):
                 "Run: pip install 'graphiti-core[falkordblite]'"
             ) from exc
         db_path = os.environ.get(
-            "GRAPHITI_FALKORDBLITE_PATH",
-            str(Path.home() / ".hermes" / "graphiti.fdb"),
+            "TEMPORAL_MEMORY_FALKORDBLITE_PATH",
+            str(Path.home() / ".hermes" / "temporal-memory.fdb"),
         )
         falkor_client = AsyncFalkorDB(dbfilename=db_path)
         return Graphiti(graph_driver=FalkorDriver(falkor_db=falkor_client))
 
     return Graphiti(
-        uri=os.environ.get("GRAPHITI_NEO4J_URI", "bolt://localhost:7687"),
-        user=os.environ.get("GRAPHITI_NEO4J_USER", "neo4j"),
-        password=os.environ.get("GRAPHITI_NEO4J_PASSWORD", "password"),
+        uri=os.environ.get("TEMPORAL_MEMORY_NEO4J_URI", "bolt://localhost:7687"),
+        user=os.environ.get("TEMPORAL_MEMORY_NEO4J_USER", "neo4j"),
+        password=os.environ.get("TEMPORAL_MEMORY_NEO4J_PASSWORD", "password"),
     )

@@ -1,4 +1,4 @@
-"""Pydantic config model for the Graphiti memory provider plugin."""
+"""Pydantic config model for the temporal memory provider plugin."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class EmbedderConfig(BaseModel):
     api_key: str | None = None
 
 
-class GraphitiConfig(BaseModel):
+class TemporalMemoryConfig(BaseModel):
     # neo4j: Docker/cloud, recommended for production and multi-user deployments.
     # kuzu: embedded, no Docker, single-user (deprecated upstream — use for dev/offline only).
     # falkordblite: embedded, no Docker, production-quality (requires Python 3.12+).
@@ -34,7 +34,7 @@ class GraphitiConfig(BaseModel):
     # Handled at the Hermes host level, not by the plugin. Setting this has no effect.
     disable_builtin_memory_tool: bool = False
 
-    # Planned: cap concurrent Graphiti extraction calls. Not yet implemented.
+    # Planned: cap concurrent backend extraction calls. Not yet implemented.
     semaphore_limit: int = Field(default=5, ge=1, le=50)
     max_recall_tokens: int = Field(default=600, ge=100, le=2000)
 

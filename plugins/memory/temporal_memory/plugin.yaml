@@ -1,10 +1,11 @@
-name: graphiti
-version: "0.1.0"
+name: temporal-memory-plugin
+version: "0.2.0"
 description: >
-  Temporal knowledge-graph memory provider powered by Graphiti (Zep).
+  Temporal knowledge-graph memory provider for Hermes Agent.
   Stores entities, relationships, and bi-temporal validity windows.
   Surfaces a recall-trigger index in MEMORY.md and supports hybrid
   (vector + BM25 + graph traversal) retrieval.
+  Pluggable backend — ships with Graphiti (Zep) but swappable.
 author: djhenry
 min_hermes_version: "1.0.0"
 type: memory_provider
@@ -19,7 +20,7 @@ hooks:
   - system_prompt_block
   - shutdown
   - post_setup
-entrypoint: plugins.memory.graphiti:register
+entrypoint: plugins.memory.temporal_memory:register
 backends:
   - neo4j        # primary — Docker/cloud, recommended for production
   - kuzu         # embedded, no Docker, Python 3.11+ (deprecated upstream)
