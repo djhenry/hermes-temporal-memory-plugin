@@ -697,7 +697,7 @@ class TemporalMemoryProvider(_MemoryBase):
             from graphiti_core.driver.kuzu_driver import KuzuDriver  # type: ignore[import]
             db_path = os.environ.get(
                 "GRAPHITI_KUZU_PATH",
-                str(Path.home() / ".hermes" / "temporal-memory.kuzu"),
+                str(Path.home() / ".hermes" / "graphiti.kuzu"),
             )
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             kuzu_driver = KuzuDriver(db=db_path)
@@ -728,7 +728,7 @@ class TemporalMemoryProvider(_MemoryBase):
                 ) from exc
             db_path = os.environ.get(
                 "GRAPHITI_FALKORDBLITE_PATH",
-                str(Path.home() / ".hermes" / "temporal-memory.fdb"),
+                str(Path.home() / ".hermes" / "graphiti.fdb"),
             )
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
             falkor_client = AsyncFalkorDB(dbfilename=db_path)
@@ -765,27 +765,27 @@ class TemporalMemoryProvider(_MemoryBase):
         lines: list[str] = []
 
         if choice == "2":
-            lines.append("TEMPORAL_MEMORY_USE_KUZU=1")
+            lines.append("GRAPHITI_USE_KUZU=1")
             db_path = input(
-                f"Kuzu DB path [default: {home / 'temporal-memory.kuzu'}]: "
-            ).strip() or str(home / "temporal-memory.kuzu")
-            lines.append(f"TEMPORAL_MEMORY_KUZU_PATH={db_path}")
+                f"Kuzu DB path [default: {home / 'graphiti.kuzu'}]: "
+            ).strip() or str(home / "graphiti.kuzu")
+            lines.append(f"GRAPHITI_KUZU_PATH={db_path}")
             backend_name = "kuzu"
         elif choice == "3":
-            lines.append("TEMPORAL_MEMORY_USE_FALKORDB_LITE=1")
+            lines.append("GRAPHITI_USE_FALKORDB_LITE=1")
             db_path = input(
-                f"FalkorDB path [default: {home / 'temporal-memory.fdb'}]: "
-            ).strip() or str(home / "temporal-memory.fdb")
-            lines.append(f"TEMPORAL_MEMORY_FALKORDBLITE_PATH={db_path}")
+                f"FalkorDB path [default: {home / 'graphiti.fdb'}]: "
+            ).strip() or str(home / "graphiti.fdb")
+            lines.append(f"GRAPHITI_FALKORDBLITE_PATH={db_path}")
             backend_name = "falkordblite"
         else:
             uri = input("Neo4j URI [default: bolt://localhost:7687]: ").strip() or "bolt://localhost:7687"
             user = input("Neo4j user [default: neo4j]: ").strip() or "neo4j"
             password = input("Neo4j password [default: password]: ").strip() or "password"
             lines += [
-                f"TEMPORAL_MEMORY_NEO4J_URI={uri}",
-                f"TEMPORAL_MEMORY_NEO4J_USER={user}",
-                f"TEMPORAL_MEMORY_NEO4J_PASSWORD={password}",
+                f"GRAPHITI_NEO4J_URI={uri}",
+                f"GRAPHITI_NEO4J_USER={user}",
+                f"GRAPHITI_NEO4J_PASSWORD={password}",
             ]
             backend_name = "neo4j"
 
@@ -804,9 +804,9 @@ class TemporalMemoryProvider(_MemoryBase):
             base_url = input("Ollama base URL [default: http://localhost:11434]: ").strip() or "http://localhost:11434"
             model = input("Ollama model [default: llama3.1:8b]: ").strip() or "llama3.1:8b"
             lines += [
-                f"TEMPORAL_MEMORY_EXTRACTION_PROVIDER=ollama",
-                f"TEMPORAL_MEMORY_EXTRACTION_MODEL={model}",
-                f"TEMPORAL_MEMORY_EXTRACTION_BASE_URL={base_url}",
+                f"GRAPHITI_EXTRACTION_PROVIDER=ollama",
+                f"GRAPHITI_EXTRACTION_MODEL={model}",
+                f"GRAPHITI_EXTRACTION_BASE_URL={base_url}",
             ]
 
         # Append to .env (create if missing)
