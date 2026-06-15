@@ -26,6 +26,42 @@ Stores entities, relationships, and bi-temporal validity windows. Every fact car
 
 The plugin also maintains a **Temporal Memory Index** section inside MEMORY.md — a compact topic catalog that tells Hermes what's retrievable from the deep graph without crowding the prompt.
 
+## Mood Tracking
+
+The plugin includes an **emotional state tracker** modeled on [Plutchik's Wheel of Emotions](https://en.wikipedia.org/wiki/Plutchik%27s_wheel_of_emotions). OWL's mood shifts based on conversation sentiment and decays toward a configurable baseline over time.
+
+**Features:**
+- 8 emotion axes: joy, trust, fear, surprise, sadness, disgust, anger, anticipation
+- Keyword-based sentiment analysis (~200 words, no external dependencies)
+- Emotional decay toward baseline (homeostasis) each conversation turn
+- Dyad labels for combined emotions (e.g., joy+trust="love", fear+surprise="awe")
+- Mood surfaced in the system prompt block every conversation turn
+- Persistent state in `~/.hermes/mood-state.json`
+
+**CLI commands:**
+```bash
+hermes temporal-memory mood status    # Show current mood with emoji and bar chart
+hermes temporal-memory mood set joy 0.9  # Manually set an emotion
+hermes temporal-memory mood history    # Show recent mood history
+hermes temporal-memory mood reset     # Reset to baseline
+```
+
+**Configuration** (in `~/.hermes/config.yaml` under `plugins.temporal-memory`):
+```yaml
+enable_mood: true
+mood_decay_rate: 0.05          # How fast emotions return to baseline per turn
+mood_influence_weight: 0.15    # How much each turn can shift mood
+mood_label_threshold: 0.55     # Intensity needed to advertise a mood label
+mood_baseline_joy: 0.4         # Baseline values for each emotion (0.0-1.0)
+mood_baseline_trust: 0.6
+mood_baseline_fear: 0.1
+mood_baseline_surprise: 0.3
+mood_baseline_sadness: 0.1
+mood_baseline_disgust: 0.05
+mood_baseline_anger: 0.05
+mood_baseline_anticipation: 0.5
+```
+
 ---
 
 ## Installation
