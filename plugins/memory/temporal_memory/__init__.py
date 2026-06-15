@@ -1156,15 +1156,6 @@ def register(ctx: Any = None) -> TemporalMemoryProvider:
                 setup_fn=register_cli,
                 description="Temporal memory plugin CLI: status, clear, export, migrate, mood",
             )
-        # Also register a top-level 'mood' command for quick mood checks
-        if hasattr(ctx, "register_cli_command"):
-            from .cli_mood import register_mood_cli
-            ctx.register_cli_command(
-                name="mood",
-                help="Check OWL's emotional state",
-                setup_fn=register_mood_cli,
-                description="Mood plugin CLI: status, set, history, reset",
-            )
     return provider
 
 
