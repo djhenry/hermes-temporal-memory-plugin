@@ -8,9 +8,8 @@ import os
 from pathlib import Path
 
 
-def register_cli(subparsers) -> None:
-    p = subparsers.add_parser("temporal-memory", help="Manage the temporal memory plugin")
-    sub = p.add_subparsers(dest="temporal_memory_cmd")
+def register_cli(subparser) -> None:
+    sub = subparser.add_subparsers(dest="temporal_memory_cmd")
 
     status = sub.add_parser("status", help="Show connection state and running cost estimate")
     status.add_argument("--verbose", "-v", action="store_true")
@@ -24,7 +23,7 @@ def register_cli(subparsers) -> None:
     mig = sub.add_parser("migrate", help="Migrate local Kuzu graph to Neo4j")
     mig.add_argument("--to", choices=["neo4j"], required=True)
 
-    p.set_defaults(func=_dispatch)
+    subparser.set_defaults(func=_dispatch)
 
 
 def _dispatch(args) -> None:

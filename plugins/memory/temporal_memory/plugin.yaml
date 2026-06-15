@@ -1,11 +1,13 @@
 name: temporal-memory-plugin
-version: "0.2.0"
+version: "0.3.0"
 description: >
   Temporal knowledge-graph memory provider for Hermes Agent.
   Stores entities, relationships, and bi-temporal validity windows.
   Surfaces a recall-trigger index in MEMORY.md and supports hybrid
   (vector + BM25 + graph traversal) retrieval.
   Pluggable backend — ships with Graphiti (Zep) but swappable.
+  Includes emotional state tracking (Plutchik's Wheel) with mood
+  analysis, decay, and history.
 author: djhenry
 min_hermes_version: "1.0.0"
 type: memory_provider

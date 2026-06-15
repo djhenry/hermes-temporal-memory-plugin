@@ -44,3 +44,19 @@ class TemporalMemoryConfig(BaseModel):
 
     extraction: ExtractionConfig = Field(default_factory=ExtractionConfig)
     embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
+
+    # --- Mood tracking (Plutchik's Wheel of Emotions) ---
+    enable_mood: bool = True
+    mood_decay_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+    mood_influence_weight: float = Field(default=0.15, ge=0.0, le=1.0)
+    mood_label_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    mood_state_file: str = "~/.hermes/mood-state.json"
+    # Baseline emotion values (0.0-1.0):
+    mood_baseline_joy: float = Field(default=0.4, ge=0.0, le=1.0)
+    mood_baseline_trust: float = Field(default=0.6, ge=0.0, le=1.0)
+    mood_baseline_fear: float = Field(default=0.1, ge=0.0, le=1.0)
+    mood_baseline_surprise: float = Field(default=0.3, ge=0.0, le=1.0)
+    mood_baseline_sadness: float = Field(default=0.1, ge=0.0, le=1.0)
+    mood_baseline_disgust: float = Field(default=0.05, ge=0.0, le=1.0)
+    mood_baseline_anger: float = Field(default=0.05, ge=0.0, le=1.0)
+    mood_baseline_anticipation: float = Field(default=0.5, ge=0.0, le=1.0)

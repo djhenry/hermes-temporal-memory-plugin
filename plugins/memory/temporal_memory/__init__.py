@@ -8,10 +8,12 @@ Implements the MemoryProvider interface with:
 - Non-blocking ingestion (daemon thread)
 - Context-fencing to prevent graph self-pollution
 - Per-identity group namespacing (profile + platform user)
+- Emotional state tracking (Plutchik's Wheel) stored as EmotionalState nodes
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -21,6 +23,15 @@ from typing import Any
 
 from .config import TemporalMemoryConfig
 from .memory_index import MemoryIndexManager
+from .mood_lexicon import (
+    EMOTION_KEYS,
+    OPPOSITES,
+    _analyze_sentiment,
+    _resolve_mood_label,
+    _emotion_summary,
+    _DYADS,
+    _OUTER_DYADS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +121,73 @@ FACT_CORRECT_SCHEMA = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Mood tool schemas
+# ---------------------------------------------------------------------------
+
+MOOD_STATUS_SCHEMA = {
+    "name": "mood_status",
+    "description": (
+        "Get OWL's current emotional state — all 8 emotion intensities, "
+        "the dominant mood label, and a brief natural-language summary."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    },
+}
+
+MOOD_SET_SCHEMA = {
+    "name": "mood_set",
+    "description": (
+        "Directly set an emotion intensity. Use this to manually adjust OWL's mood, "
+        "or to reset emotions to baseline. Only affects the specified emotion axis."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "emotion": {
+                "type": "string",
+                "description": f"Emotion to set. One of: {', '.join(EMOTION_KEYS)}",
+                "enum": EMOTION_KEYS,
+            },
+            "intensity": {
+                "type": "number",
+                "description": "Intensity value between 0.0 (none) and 1.0 (maximum).",
+                "minimum": 0.0,
+                "maximum": 1.0,
+            },
+        },
+        "required": ["emotion", "intensity"],
+    },
+}
+
+MOOD_HISTORY_SCHEMA = {
+    "name": "mood_history",
+    "description": (
+        "Return recent mood history — how emotions have changed over recent turns. "
+        "Useful for understanding emotional trajectory."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "Number of history entries to return (default 20, max 100).",
+                "minimum": 1,
+                "maximum": 100,
+                "default": 20,
+            },
+        },
+        "required": [],
+    },
+}
+
+# Mood index fence tags
+_MOOD_INDEX_FENCE_START = "<!-- mood-plugin:index:start -->"
+_MOOD_INDEX_FENCE_END = "<!-- mood-plugin:index:end -->"
+
 # Memory-context fence tag (stripped before graph ingestion) --------------
 _CONTEXT_FENCE_TAG = "<memory-context>"
 _CONTEXT_FENCE_END = "</memory-context>"
@@ -121,7 +199,9 @@ SYSTEM_PROMPT_BLOCK = (
     "by the temporal memory plugin. It summarises what topics and entities are "
     "available in deep memory. Do not edit or delete it manually. "
     "To retrieve full details, timelines, or historical facts, use the "
-    "temporal_search, fact_history, or graph_browse tools."
+    "temporal_search, fact_history, or graph_browse tools. "
+    "To check or adjust OWL's emotional state, use the "
+    "mood_status, mood_set, or mood_history tools."
 )
 
 
@@ -147,6 +227,17 @@ class TemporalMemoryProvider(_MemoryBase):
         # loop closed. A single long-lived loop avoids this entirely.
         self._async_loop: Any = None
         self._async_thread: threading.Thread | None = None
+
+        # --- Mood state ---
+        self._mood_enabled: bool = False
+        self._mood_emotions: dict[str, float] = _default_emotions()
+        self._mood_log: list[dict[str, Any]] = []
+        self._mood_turns: int = 0
+        self._mood_decay_rate: float = 0.05
+        self._mood_influence_weight: float = 0.15
+        self._mood_label_threshold: float = 0.55
+        self._mood_state_file: str = os.path.expanduser("~/.hermes/mood-state.json")
+        self._mood_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Async loop management
@@ -265,9 +356,41 @@ class TemporalMemoryProvider(_MemoryBase):
         else:
             log.debug("[temporal-memory] memory index disabled")
 
+        # --- Mood initialization ---
+        self._mood_enabled = getattr(self._cfg, "enable_mood", True)
+        if self._mood_enabled:
+            # Load mood config from plugin config
+            self._mood_decay_rate = getattr(self._cfg, "mood_decay_rate", 0.05)
+            self._mood_influence_weight = getattr(self._cfg, "mood_influence_weight", 0.15)
+            self._mood_label_threshold = getattr(self._cfg, "mood_label_threshold", 0.55)
+            self._mood_state_file = os.path.expanduser(
+                getattr(self._cfg, "mood_state_file", "~/.hermes/mood-state.json")
+            )
+            # Load baseline emotions from config
+            baseline = {}
+            for k in EMOTION_KEYS:
+                cfg_key = f"mood_baseline_{k}"
+                baseline[k] = getattr(self._cfg, cfg_key, _default_emotions()[k])
+            self._mood_emotions = baseline
+
+            # Load persisted state
+            self._mood_load_state()
+            self._mood_turns = 0
+            log.info("[temporal-memory] mood tracking enabled — loaded %d history entries",
+                     len(self._mood_log))
+        else:
+            log.debug("[temporal-memory] mood tracking disabled")
+
     def shutdown(self) -> None:
+        # Allow up to 90s for an in-progress extraction to finish cleanly.
+        # Without this, CLI sessions exit before add_episode completes (~23s
+        # with local LM Studio), losing the memory for that turn.
         if self._sync_thread and self._sync_thread.is_alive():
-            self._sync_thread.join(timeout=5)
+            self._sync_thread.join(timeout=90)
+        # Persist mood state before shutting down
+        if self._mood_enabled:
+            log.info("[temporal-memory] shutdown — persisting mood state")
+            self._mood_persist()
         if self._client:
             try:
                 self._run(self._client.close())
@@ -289,9 +412,22 @@ class TemporalMemoryProvider(_MemoryBase):
     # ------------------------------------------------------------------
 
     def system_prompt_block(self) -> str | None:
-        if not self._cfg.enable_memory_index:
+        if not self._cfg.enable_memory_index and not self._mood_enabled:
             return None
-        return SYSTEM_PROMPT_BLOCK
+        parts = []
+        if self._cfg.enable_memory_index:
+            parts.append(SYSTEM_PROMPT_BLOCK)
+        if self._mood_enabled:
+            label = _resolve_mood_label(self._mood_emotions, self._mood_label_threshold)
+            summary = _emotion_summary(self._mood_emotions, label)
+            mood_line = (
+                f"[Mood] OWL's current emotional state: {label} ({summary}). "
+                f"Emotions: " +
+                ", ".join(f"{k}={v:.2f}" for k, v in self._mood_emotions.items()) +
+                "."
+            )
+            parts.append(mood_line)
+        return "\n".join(parts) if parts else None
 
     # ------------------------------------------------------------------
     # Context retrieval
@@ -331,10 +467,13 @@ class TemporalMemoryProvider(_MemoryBase):
 
     def sync_turn(self, user_content: str, assistant_content: str, messages: Any = None, session_id: str = "") -> None:
         log.info("[temporal-memory] sync_turn CALLED: session=%s, user_len=%d, assistant_len=%d", session_id, len(user_content), len(assistant_content))
-        # Join previous sync thread with short timeout before starting the next
+        # Wait up to 60s for the previous ingestion to finish before starting the next.
+        # FalkorDB Lite doesn't handle concurrent writes safely; serialising here
+        # prevents the EdgeDuplicate validation failures seen with a 2s timeout
+        # (add_episode typically takes 10-50s depending on model speed).
         with self._sync_lock:
             if self._sync_thread and self._sync_thread.is_alive():
-                self._sync_thread.join(timeout=2)
+                self._sync_thread.join(timeout=60)
 
             self._sync_thread = threading.Thread(
                 target=self._ingest_turn,
@@ -381,12 +520,19 @@ class TemporalMemoryProvider(_MemoryBase):
     # ------------------------------------------------------------------
 
     def get_tool_schemas(self) -> list[dict]:
-        return [
+        schemas = [
             TEMPORAL_SEARCH_SCHEMA,
             FACT_HISTORY_SCHEMA,
             GRAPH_BROWSE_SCHEMA,
             FACT_CORRECT_SCHEMA,
         ]
+        if self._mood_enabled:
+            schemas.extend([
+                MOOD_STATUS_SCHEMA,
+                MOOD_SET_SCHEMA,
+                MOOD_HISTORY_SCHEMA,
+            ])
+        return schemas
 
     def handle_tool_call(self, name: str, args: dict) -> str:
         if name == "temporal_search":
@@ -397,7 +543,70 @@ class TemporalMemoryProvider(_MemoryBase):
             return self._graph_browse(**args)
         if name == "fact_correct":
             return self._fact_correct(**args)
+        if name == "mood_status":
+            return self._mood_status()
+        if name == "mood_set":
+            return self._mood_set(**args)
+        if name == "mood_history":
+            return self._mood_history(**args)
         return f"Unknown tool: {name}"
+
+    # ------------------------------------------------------------------
+    # Mood tool implementations
+    # ------------------------------------------------------------------
+
+    def _mood_status(self) -> str:
+        if not self._mood_enabled:
+            return "Mood tracking is disabled."
+        emotions = self._mood_emotions
+        label = _resolve_mood_label(emotions, self._mood_label_threshold)
+        summary = _emotion_summary(emotions, label)
+        lines = [
+            f"Mood: {label}",
+            f"Summary: {summary}",
+            "",
+            "Emotion intensities:",
+        ]
+        for k in EMOTION_KEYS:
+            val = emotions.get(k, 0.0)
+            bar = "█" * int(val * 20) + "░" * (20 - int(val * 20))
+            lines.append(f"  {k:>14s} [{bar}] {val:.3f}")
+        lines.append("")
+        lines.append(f"Session turns: {self._mood_turns}")
+        lines.append(f"History entries: {len(self._mood_log)}")
+        return "\n".join(lines)
+
+    def _mood_set(self, emotion: str, intensity: float) -> str:
+        if not self._mood_enabled:
+            return "Mood tracking is disabled."
+        if emotion not in EMOTION_KEYS:
+            return f"Unknown emotion '{emotion}'. Valid: {', '.join(EMOTION_KEYS)}"
+        old = self._mood_emotions.get(emotion, 0.0)
+        self._mood_emotions[emotion] = max(0.0, min(1.0, float(intensity)))
+        self._mood_persist()
+        label = _resolve_mood_label(self._mood_emotions, self._mood_label_threshold)
+        return (
+            f"Set {emotion}: {old:.3f} -> {self._mood_emotions[emotion]:.3f}. "
+            f"New dominant mood: {label}."
+        )
+
+    def _mood_history(self, limit: int = 20) -> str:
+        if not self._mood_enabled:
+            return "Mood tracking is disabled."
+        entries = self._mood_log[-limit:]
+        if not entries:
+            return "No mood history yet."
+        lines = [f"Last {len(entries)} mood entries:", ""]
+        for e in entries:
+            lines.append(
+                f"  Turn {e.get('turn', '?'):>4} | {e.get('mood_label', '?'):<16s} | "
+                f"joy={e['emotions']['joy']:.2f} "
+                f"trust={e['emotions']['trust']:.2f} "
+                f"fear={e['emotions']['fear']:.2f} "
+                f"sad={e['emotions']['sadness']:.2f} "
+                f"anger={e['emotions']['anger']:.2f}"
+            )
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Internal search helper
@@ -541,6 +750,95 @@ class TemporalMemoryProvider(_MemoryBase):
             return f"fact_correct error: {exc}"
 
     # ------------------------------------------------------------------
+    # Mood helpers
+    # ------------------------------------------------------------------
+
+    def _mood_load_state(self) -> None:
+        """Load persisted mood state from JSON file."""
+        try:
+            if os.path.exists(self._mood_state_file):
+                with open(self._mood_state_file) as f:
+                    data = json.load(f)
+                if "emotions" in data:
+                    for k in EMOTION_KEYS:
+                        if k in data["emotions"]:
+                            self._mood_emotions[k] = float(data["emotions"][k])
+                if "history" in data:
+                    self._mood_log = data["history"][-500:]
+                log.debug("[temporal-memory] mood: loaded state from %s", self._mood_state_file)
+        except Exception as exc:
+            log.warning("[temporal-memory] mood: could not load state: %s", exc)
+
+    def _mood_persist(self) -> None:
+        """Persist current mood state to JSON file."""
+        try:
+            data = {
+                "emotions": {k: round(v, 6) for k, v in self._mood_emotions.items()},
+                "history": self._mood_log[-500:],
+                "turns": self._mood_turns,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+            }
+            os.makedirs(os.path.dirname(self._mood_state_file), exist_ok=True)
+            with open(self._mood_state_file, "w") as f:
+                json.dump(data, f, indent=2, default=str)
+        except Exception as exc:
+            log.error("[temporal-memory] mood: could not persist state: %s", exc)
+
+    def _mood_update(self, user_content: str, assistant_content: str) -> None:
+        """Analyze conversation turn and update mood state."""
+        with self._mood_lock:
+            self._mood_turns += 1
+
+            # Analyze sentiment
+            user_deltas = _analyze_sentiment(user_content)
+            assistant_deltas = _analyze_sentiment(assistant_content)
+
+            # Weight user sentiment more heavily
+            combined: dict[str, float] = {}
+            for k in EMOTION_KEYS:
+                combined[k] = user_deltas[k] * 0.7 + assistant_deltas[k] * 0.3
+
+            # Apply influence weight
+            w = self._mood_influence_weight
+            for k in EMOTION_KEYS:
+                combined[k] *= w
+
+            # Apply deltas with clamping
+            for k in EMOTION_KEYS:
+                self._mood_emotions[k] = max(0.0, min(1.0,
+                    self._mood_emotions[k] + combined[k]
+                ))
+
+            # Apply decay toward baseline
+            decay = self._mood_decay_rate
+            if decay > 0:
+                baseline = _default_emotions()
+                for k in EMOTION_KEYS:
+                    diff = baseline[k] - self._mood_emotions[k]
+                    self._mood_emotions[k] += diff * decay
+                    self._mood_emotions[k] = max(0.0, min(1.0, self._mood_emotions[k]))
+
+            # Record history
+            label = _resolve_mood_label(self._mood_emotions, self._mood_label_threshold)
+            self._mood_log.append({
+                "turn": self._mood_turns,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "mood_label": label,
+                "emotions": {k: round(v, 4) for k, v in self._mood_emotions.items()},
+                "deltas": {k: round(v, 4) for k, v in combined.items()},
+            })
+
+            # Trim log
+            if len(self._mood_log) > 500:
+                self._mood_log = self._mood_log[-500:]
+
+            # Persist
+            self._mood_persist()
+
+            log.debug("[temporal-memory] mood: turn %d — label=%s",
+                      self._mood_turns, label)
+
+    # ------------------------------------------------------------------
     # Background tasks
     # ------------------------------------------------------------------
 
@@ -591,6 +889,14 @@ class TemporalMemoryProvider(_MemoryBase):
                     )
                 elif not self._index:
                     log.debug("[temporal-memory] index disabled (enable_memory_index=False)")
+
+            # Update mood state based on conversation sentiment
+            if self._mood_enabled:
+                try:
+                    self._mood_update(clean_user, clean_assistant)
+                except Exception as exc:
+                    log.warning("[temporal-memory] mood update failed: %s", exc)
+
         except Exception as exc:
             log.warning("temporal-memory sync_turn ingestion failed: %s", exc)
 
@@ -612,6 +918,11 @@ class TemporalMemoryProvider(_MemoryBase):
             return
         _NODE_LIMIT = 500
         _EDGE_LIMIT = 1000
+        import time
+        # FalkorDB Lite (redislite) may not have finished loading the persisted
+        # .fdb file by the time this thread starts. Wait briefly so the first
+        # query doesn't race the data load and return 0 results.
+        time.sleep(3)
         try:
             log.debug("[temporal-memory] seed_index: fetching nodes/edges for group %s", self._group_id)
             nodes = self._run(self._client.nodes.entity.get_by_group_ids(
