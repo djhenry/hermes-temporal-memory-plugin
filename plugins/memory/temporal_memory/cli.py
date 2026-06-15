@@ -8,12 +8,82 @@ import json
 import os
 from pathlib import Path
 
-from .mood_lexicon import (
-    EMOTION_KEYS,
-    _default_emotions,
-    _resolve_mood_label,
-    _emotion_summary,
-)
+# Inline mood model (avoid relative import — cli.py is loaded via
+# spec_from_file_location which doesn't set up the parent package).
+EMOTION_KEYS = [
+    "joy", "trust", "fear", "surprise",
+    "sadness", "disgust", "anger", "anticipation",
+]
+
+_DYADS = [
+    (("joy", "trust"), "love"),
+    (("trust", "fear"), "submission"),
+    (("fear", "surprise"), "awe"),
+    (("surprise", "sadness"), "disapproval"),
+    (("sadness", "disgust"), "remorse"),
+    (("disgust", "anger"), "contempt"),
+    (("anger", "anticipation"), "aggressiveness"),
+    (("anticipation", "joy"), "optimism"),
+]
+
+_OUTER_DYADS = [
+    (("joy", "fear"), "guilt"),
+    (("trust", "sadness"), "sentimentality"),
+    (("fear", "disgust"), "shame"),
+    (("surprise", "anger"), "outrage"),
+    (("sadness", "anger"), "envy"),
+    (("disgust", "anticipation"), "cynicism"),
+    (("anger", "joy"), "pride"),
+    (("anticipation", "trust"), "hope"),
+]
+
+
+def _default_emotions():
+    return {
+        "joy": 0.4, "trust": 0.6, "fear": 0.1, "surprise": 0.3,
+        "sadness": 0.1, "disgust": 0.05, "anger": 0.05, "anticipation": 0.5,
+    }
+
+
+def _resolve_mood_label(emotions: dict, threshold: float = 0.55) -> str:
+    max_emotion = max(emotions, key=lambda k: emotions.get(k, 0.0))
+    if emotions.get(max_emotion, 0.0) >= threshold:
+        return max_emotion
+    for (e1, e2), label in _DYADS:
+        if (emotions.get(e1, 0.0) + emotions.get(e2, 0.0)) / 2 >= threshold:
+            return label
+    for (e1, e2), label in _OUTER_DYADS:
+        if (emotions.get(e1, 0.0) + emotions.get(e2, 0.0)) / 2 >= threshold * 0.85:
+            return label
+    pos = emotions.get("joy", 0.0) + emotions.get("trust", 0.0) + emotions.get("anticipation", 0.0)
+    neg = emotions.get("sadness", 0.0) + emotions.get("anger", 0.0) + emotions.get("fear", 0.0) + emotions.get("disgust", 0.0)
+    if pos > neg + 0.2:
+        return "content"
+    elif neg > pos + 0.2:
+        return "subdued"
+    return "calm"
+
+
+def _emotion_summary(emotions: dict, label: str) -> str:
+    sorted_e = sorted(emotions.items(), key=lambda x: -x[1])
+    parts = []
+    for name, val in sorted_e[:3]:
+        if val > 0.7:
+            parts.append(f"very {name}")
+        elif val > 0.5:
+            parts.append(f"quite {name}")
+        elif val > 0.3:
+            parts.append(f"mildly {name}")
+        elif val > 0.15:
+            parts.append(f"slightly {name}")
+    if not parts:
+        return "feeling neutral and balanced"
+    if len(parts) == 1:
+        return f"feeling {parts[0]}"
+    elif len(parts) == 2:
+        return f"feeling {parts[0]} and {parts[1]}"
+    else:
+        return f"feeling {parts[0]}, {parts[1]}, and {parts[2]}"
 
 # Emoji mappings for mood labels
 _MOOD_EMOJI = {
