@@ -29,6 +29,7 @@ from .mood_lexicon import (
     _analyze_sentiment,
     _resolve_mood_label,
     _emotion_summary,
+    _default_emotions,
     _DYADS,
     _OUTER_DYADS,
 )
@@ -274,11 +275,23 @@ class TemporalMemoryProvider(_MemoryBase):
 
     def is_available(self) -> bool:
         # No network call — just check that at least one backend is configured.
+        # initialize() hasn't run yet when this is called, so we eagerly read
+        # the backend from config.yaml if the cfg still holds the default "neo4j".
+        cfg_backend = self._cfg.backend
+        if cfg_backend == "neo4j" and not os.environ.get("GRAPHITI_NEO4J_URI"):
+            try:
+                from hermes_cli.config import load_config, cfg_get
+                full_cfg = load_config()
+                cfg_dict = cfg_get(full_cfg, "plugins", "temporal-memory") or {}
+                if isinstance(cfg_dict, dict) and "backend" in cfg_dict:
+                    cfg_backend = cfg_dict["backend"]
+            except Exception:
+                pass
         return bool(
             os.environ.get("GRAPHITI_NEO4J_URI")
             or os.environ.get("GRAPHITI_USE_KUZU")
             or os.environ.get("GRAPHITI_USE_FALKORDB_LITE")
-            or self._cfg.backend in ("kuzu", "falkordblite")
+            or cfg_backend in ("kuzu", "falkordblite")
         )
 
     # ------------------------------------------------------------------
