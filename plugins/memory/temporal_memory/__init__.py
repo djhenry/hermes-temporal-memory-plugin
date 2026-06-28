@@ -932,10 +932,31 @@ class TemporalMemoryProvider(_MemoryBase):
         _NODE_LIMIT = 500
         _EDGE_LIMIT = 1000
         import time
+
         # FalkorDB Lite (redislite) may not have finished loading the persisted
-        # .fdb file by the time this thread starts. Wait briefly so the first
-        # query doesn't race the data load and return 0 results.
-        time.sleep(3)
+        # .fdb file by the time this thread starts.  Poll with a lightweight
+        # probe query instead of a fixed sleep so we adapt to actual load time.
+        _READY_TIMEOUT = 15   # seconds max wait
+        _READY_INTERVAL = 1   # seconds between probes
+        _ready = False
+        for attempt in range(int(_READY_TIMEOUT / _READY_INTERVAL)):
+            try:
+                probe = self._run(self._client.nodes.entity.get_by_group_ids(
+                    group_ids=[self._group_id],
+                    limit=1,
+                ))
+                if probe:
+                    _ready = True
+                    log.debug("[temporal-memory] seed_index: FalkorDB ready after %.0fs (probe returned %d node(s))",
+                              (attempt + 1) * _READY_INTERVAL, len(probe))
+                    break
+            except Exception as exc:
+                log.debug("[temporal-memory] seed_index: readiness probe %d failed: %s", attempt + 1, exc)
+            time.sleep(_READY_INTERVAL)
+        if not _ready:
+            log.warning("[temporal-memory] seed_index: FalkorDB not ready after %ds — proceeding with seed attempt anyway (may get 0 results)",
+                        _READY_TIMEOUT)
+
         try:
             log.debug("[temporal-memory] seed_index: fetching nodes/edges for group %s", self._group_id)
             nodes = self._run(self._client.nodes.entity.get_by_group_ids(
