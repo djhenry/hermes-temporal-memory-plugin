@@ -1,0 +1,4 @@
+# Dependencies for scripts/spotify_to_ytmusic.py
+# Install with: pip install -r scripts/requirements-spotify-migration.txt
+spotipy>=2.23
+ytmusicapi>=1.7
